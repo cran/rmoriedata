@@ -1,0 +1,51 @@
+Package: rmoriedata
+Type: Package
+Title: Integrated Datasets for the 'rmorie' Package
+Version: 0.3.2
+Authors@R: c(
+  person(
+    given = "Vansh Singh",
+    family = "Ruhela",
+    email = "vsruhela@proton.me",
+    role = c("aut", "cre"),
+    comment = c(ORCID = "0009-0004-1750-3592")
+  )
+ )
+Description: Integrated open data fixtures used by the 'rmorie' package
+  for examples, vignettes, and tests. Split out so 'rmorie' itself
+  stays within the 'CRAN' package-size soft cap. Contains snapshots of
+  publicly available datasets from open-data portals built on the
+  Comprehensive Knowledge Archive Network ('CKAN', <https://ckan.org/>),
+  'Socrata' (<https://dev.socrata.com/>), and 'Opendatasoft'
+  (<https://www.huwise.com/>) (Chicago, New York City, Toronto,
+  Vancouver, and others), Statistics Canada Canadian Centre for Justice
+  and Community Safety Statistics ('CCJS') tables, a multi-agent-reviewed
+  corpus of Ontario Special Investigations Unit ('SIU',
+  <https://www.siu.on.ca/>) director's reports, and synthetic fixtures
+  for unit tests. Also ships a small set of analyst-facing helpers for
+  releasing aggregate statistics without re-identification risk: Laplace
+  and Gaussian differential privacy mechanisms and k-anonymity,
+  l-diversity, and cell suppression verifiers.
+License: AGPL (>= 3)
+Encoding: UTF-8
+Depends: R (>= 4.3.0)
+Imports: stats, rmoriebricklayer (>= 0.2.1)
+LinkingTo: rmoriebricklayer
+Suggests: testthat (>= 3.0.0), nanoparquet, tibble, curl, jsonlite,
+        knitr, rmarkdown
+VignetteBuilder: knitr
+LazyData: true
+LazyDataCompression: xz
+Config/testthat/edition: 3
+URL: https://github.com/rootcoder007/rmoriedata
+BugReports: https://github.com/rootcoder007/rmoriedata/issues
+biocViews: Software, ExperimentData
+Config/roxygen2/version: 8.0.0
+RoxygenNote: 7.3.3
+NeedsCompilation: yes
+Packaged: 2026-09-08 20:29:29 UTC; rootcoder
+Author: Vansh Singh Ruhela [aut, cre] (ORCID:
+    <https://orcid.org/0009-0004-1750-3592>)
+Maintainer: Vansh Singh Ruhela <vsruhela@proton.me>
+Repository: CRAN
+Date/Publication: 2026-09-17 10:00:02 UTC
