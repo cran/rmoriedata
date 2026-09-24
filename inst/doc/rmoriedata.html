@@ -363,9 +363,10 @@ catalogue.</li>
 </ol>
 <div id="browsing-the-bundled-store" class="section level2">
 <h2>1. Browsing the bundled store</h2>
-<p>Every bundled table lives in a Parquet store.
-<code>morie_data_catalog()</code> lists what’s there, with row/column
-counts and the original source path.</p>
+<p>Every bundled table ships as a CSV with a bundled column schema,
+listed in a SHA-256 manifest that is signed with the package’s XMSS key
+and verified on load (see ). <code>morie_data_catalog()</code> lists
+what’s there, with row/column counts and the original source path.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>cat <span class="ot">&lt;-</span> <span class="fu">morie_data_catalog</span>()</span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">table</span>(cat<span class="sc">$</span>kind)</span>
 <span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="co">#&gt; </span></span>
@@ -460,10 +461,10 @@ download and is a network call, so it isn’t run here.)</p>
 <p>Verify you’re using the exact data slice the package shipped:</p>
 <div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a>ck <span class="ot">&lt;-</span> <span class="fu">morie_data_checksums</span>()</span>
 <span id="cb8-2"><a href="#cb8-2" tabindex="-1"></a><span class="fu">head</span>(ck[<span class="fu">order</span>(<span class="sc">-</span>ck<span class="sc">$</span>bytes), <span class="fu">c</span>(<span class="st">&quot;file&quot;</span>, <span class="st">&quot;bytes&quot;</span>)], <span class="dv">3</span>)</span>
-<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a><span class="co">#&gt;                              file    bytes</span></span>
-<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a><span class="co">#&gt; 177             rmoriedata.sqlite 14835712</span></span>
-<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a><span class="co">#&gt; 29            describe_corpus.Rds  1712072</span></span>
-<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a><span class="co">#&gt; 183 siu_directors_reports.parquet  1035827</span></span>
+<span id="cb8-3"><a href="#cb8-3" tabindex="-1"></a><span class="co">#&gt;                                     file    bytes</span></span>
+<span id="cb8-4"><a href="#cb8-4" tabindex="-1"></a><span class="co">#&gt; 182                    rmoriedata.sqlite 14835712</span></span>
+<span id="cb8-5"><a href="#cb8-5" tabindex="-1"></a><span class="co">#&gt; 154 siu_directors_reports_corpus.parquet  8097910</span></span>
+<span id="cb8-6"><a href="#cb8-6" tabindex="-1"></a><span class="co">#&gt; 153        siu_directors_reports.parquet  7445077</span></span>
 <span id="cb8-7"><a href="#cb8-7" tabindex="-1"></a></span>
 <span id="cb8-8"><a href="#cb8-8" tabindex="-1"></a><span class="co"># The same compiled SHA256 kernel the whole ecosystem uses:</span></span>
 <span id="cb8-9"><a href="#cb8-9" tabindex="-1"></a><span class="fu">morie_core_sha256</span>(<span class="st">&quot;abc&quot;</span>)</span>
@@ -530,9 +531,11 @@ the marginals:</p>
 <h2>Bridging to Python</h2>
 <p><code>load_chicago_data(..., as = &quot;parquet_path&quot;)</code> writes a
 Parquet file and returns its path – the recommended hand-off to
-<code>pandas.read_parquet()</code>. Because the store is Parquet
-throughout, the same tables load natively in R, Python, DuckDB, and
-Arrow.</p>
+<code>pandas.read_parquet()</code>. The file comes from the package’s
+own Parquet writer, so it loads natively in pandas, polars, DuckDB and
+Arrow with no R runtime. The bundled store itself is one CSV per table
+plus a column schema; read it with <code>morie_data_load()</code> in R
+or with any CSV reader elsewhere.</p>
 </div>
 
 

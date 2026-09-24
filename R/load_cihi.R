@@ -41,6 +41,9 @@
 #' cat$title[grepl("hospital", cat$title, ignore.case = TRUE)][1:3]
 #' @export
 load_cihi_data_tables <- function(archived_only = FALSE) {
+  if (!isTRUE(archived_only) && !isFALSE(archived_only)) {
+    stop("`archived_only` must be TRUE or FALSE.", call. = FALSE)
+  }
   path <- system.file("extdata", "cihi_data_tables.csv",
     package = "rmoriedata"
   )
@@ -104,9 +107,21 @@ fetch_cihi_table <- function(which, dest = NULL, timeout = 120L) {
     )
   }
   cat_df <- load_cihi_data_tables()
+  if (!is.numeric(timeout) || length(timeout) != 1L || !is.finite(timeout) ||
+        timeout <= 0) {
+    stop("`timeout` must be a single positive number of seconds.",
+         call. = FALSE)
+  }
   if (is.numeric(which)) {
+    if (length(which) != 1L || is.na(which) || which != trunc(which) ||
+          which < 1 || which > nrow(cat_df)) {
+      stop(sprintf("`which` must be a whole number between 1 and %d (a row of ",
+                   nrow(cat_df)), "load_cihi_data_tables()) or a title substring.",
+           call. = FALSE)
+    }
     idx <- as.integer(which)
   } else {
+    .rmoriedata_scalar(which, "which")
     hits <- grep(tolower(which), tolower(cat_df$title), fixed = TRUE)
     if (length(hits) == 0L) stop("no CIHI table matches '", which, "'.", call. = FALSE)
     if (length(hits) > 1L) {
@@ -123,8 +138,50 @@ fetch_cihi_table <- function(which, dest = NULL, timeout = 120L) {
     dest <- tempfile(fileext = paste0(".", ext))
   }
   wb <- if ("wayback_url" %in% names(row)) row[["wayback_url"]] else ""
-  rmoriebricklayer::bricklayer_fetch(row[["url"]], dest,
-    wayback = wb, timeout = timeout
-  )
+  fmt <- if ("format" %in% names(row)) row[["format"]] else "xlsx"
+  .rmd_fetch_file(row[["url"]], dest, wb, timeout)
+  live <- tryCatch(.rmd_check_download(dest, fmt), error = function(e) e)
+  if (inherits(live, "error")) {
+    # A 200 carrying an outage page satisfied the fetch engine, so its
+    # Wayback fallback never ran; try the archived copy before giving up.
+    if (!nzchar(wb)) stop(live)
+    .rmd_fetch_file(wb, dest, "", timeout)
+    .rmd_check_download(dest, fmt)
+  }
   invisible(dest)
+}
+
+# The shared fetch-with-fallback engine; one seam for the tests.
+.rmd_fetch_file <- function(url, dest, wayback, timeout) {
+  rmoriebricklayer::bricklayer_fetch(url, dest, wayback = wayback,
+                                     timeout = timeout)
+}
+
+# A 200 is not a table: an outage page or an empty body arrives with the
+# same status. Check the size and the file signature against the format
+# the catalogue declares, and remove the file rather than hand back a
+# path that readxl will reject much later.
+.rmd_check_download <- function(dest, format) {
+  size <- file.info(dest)$size
+  if (is.na(size) || size == 0L) {
+    unlink(dest)
+    stop("the download is empty; the service returned no data.", call. = FALSE)
+  }
+  magic <- readBin(dest, "raw", 4L)
+  ok <- switch(tolower(format),
+    xlsx = , zip = identical(magic, as.raw(c(0x50, 0x4b, 0x03, 0x04))),
+    xls = identical(magic, as.raw(c(0xd0, 0xcf, 0x11, 0xe0))),
+    # a text table: not an HTML page, and more than a header line
+    !identical(magic[1L], as.raw(0x3c)) &&
+      length(readLines(dest, n = 2L, warn = FALSE)) >= 2L
+  )
+  if (!isTRUE(ok)) {
+    head <- rawToChar(magic[magic != as.raw(0)])
+    unlink(dest)
+    stop(sprintf(paste0("the download is not a %s file (it begins with %s); ",
+                        "the service probably returned an error page."),
+                 format, if (nzchar(head)) deparse(head) else "NUL bytes"),
+         call. = FALSE)
+  }
+  invisible(TRUE)
 }

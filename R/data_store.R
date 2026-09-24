@@ -1,144 +1,354 @@
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# Data store: one CSV per table under inst/extdata, a catalog and a
+# column schema beside them.
 #
-# Loader API over the bundled Parquet store (inst/extdata/parquet/).
-# Migrated from SQLite -> Parquet on 2026-07-01 so the package no longer needs
-# RSQLite (whose vendored boost is a slow/timeout-prone source compile on
-# r-universe Windows). Parquet is cross-language (R / Python / DuckDB / Arrow).
-# Each table is one <slug>.parquet, plus `_catalog.parquet` and
-# `_dictionaries.parquet`. Rebuilt by data-raw/migrate_sqlite_to_parquet.R.
+# Every table ships once, as the CSV that rmorie reads by file name.
+# morie_data_load() reads that CSV and applies the column names and
+# classes recorded in `_schema.csv`, so the result is typed the way the
+# retired parquet copies were, and it keeps the result in a session cache
+# so repeated loads cost nothing. Dictionaries are the JSON files the
+# catalog points at.
 
-.rmoriedata_parquet_dir <- function() {
-  p <- system.file("extdata", "parquet", package = "rmoriedata")
+.rmoriedata_cache <- new.env(parent = emptyenv())
+
+.rmoriedata_extdata <- function() {
+  p <- getOption("rmoriedata.store", NULL)
+  if (is.null(p)) p <- system.file("extdata", package = "rmoriedata")
   if (!nzchar(p) || !dir.exists(p)) {
-    stop("rmoriedata parquet store not found; reinstall rmoriedata.",
-      call. = FALSE
-    )
+    stop("rmoriedata data store not found; reinstall rmoriedata.",
+         call. = FALSE)
   }
   p
 }
 
-.rmoriedata_read <- function(name) {
-  f <- file.path(.rmoriedata_parquet_dir(), paste0(name, ".parquet"))
-  if (!file.exists(f)) {
-    return(NULL)
-  }
-  morie_read_parquet(f)
+.rmoriedata_csv <- function(name) {
+  f <- file.path(.rmoriedata_extdata(), name)
+  if (!file.exists(f)) return(NULL)
+  .rmoriedata_check_file(name)
+  # encoding =, not fileEncoding =: fileEncoding re-encodes through the
+  # session locale, and in a C locale every non-ASCII byte truncates the
+  # field (22 of 99 tables short, 5 empty, 2026-09-18). encoding = marks
+  # the strings as UTF-8 and leaves the bytes alone. The store has no BOM.
+  utils::read.csv(f, check.names = FALSE, stringsAsFactors = FALSE,
+                  encoding = "UTF-8")
 }
 
-#' Catalogue of bundled datasets
+.rmoriedata_schema <- function() {
+  s <- .rmoriedata_cache[["_schema"]]
+  if (is.null(s)) {
+    s <- .rmoriedata_csv("_schema.csv")
+    if (is.null(s)) {
+      stop("rmoriedata schema not found; reinstall rmoriedata.", call. = FALSE)
+    }
+    assign("_schema", s, envir = .rmoriedata_cache)
+  }
+  s
+}
+
+#' Catalog of the bundled datasets
 #'
-#' Lists every dataset in the bundled Parquet store, including row/column
-#' counts and the original source path each table was built from.
+#' One row per bundled table or dictionary: `slug`, `source_path`
+#' (relative to the package's `extdata` directory), `kind`, and for
+#' tables `n_rows`, `n_cols` and `parquet_path` (the same table as a
+#' Parquet file, see [morie_data_path()]).
 #'
-#' @return A `data.frame` with columns `slug`, `source_path`, `kind`,
-#'   `n_rows`, `n_cols`.
-#' @seealso [morie_data_load()], [morie_data_dictionary()]
+#' @return A data frame.
 #' @examples
 #' cat <- morie_data_catalog()
-#' str(cat)
-#'
-#' # How many datasets of each kind are bundled?
-#' table(cat$kind)
-#'
-#' # The tables, largest first.
 #' tbls <- cat[cat$kind == "table", c("slug", "n_rows", "n_cols")]
 #' head(tbls[order(-tbls$n_rows), ])
-#'
-#' # Every slug you can pass to morie_data_load().
-#' head(cat$slug, 10)
-#'
-#' # Where each table was originally built from.
-#' head(cat[, c("slug", "source_path")])
 #' @export
 morie_data_catalog <- function() {
-  cat <- .rmoriedata_read("_catalog")
+  cat <- .rmoriedata_cache[["_catalog"]]
   if (is.null(cat)) {
-    stop("rmoriedata catalog not found; reinstall rmoriedata.", call. = FALSE)
+    cat <- .rmoriedata_csv("_catalog.csv")
+    if (is.null(cat)) {
+      stop("rmoriedata catalog not found; reinstall rmoriedata.",
+           call. = FALSE)
+    }
+    cat$n_rows <- as.integer(cat$n_rows)
+    cat$n_cols <- as.integer(cat$n_cols)
+    assign("_catalog", cat, envir = .rmoriedata_cache)
   }
   cat
 }
 
 #' Load a bundled dataset by slug
 #'
+#' Reads the table's CSV and applies the column names and classes from
+#' the bundled schema, so the result is the same typed data frame on
+#' every platform regardless of how `read.csv()` would have guessed.
+#' Every table also ships as a Parquet file holding the same typed
+#' frame; `format = "parquet"` reads that copy instead. The first load
+#' of a table is cached for the session; later calls return the cached
+#' copy unless `refresh = TRUE`.
+#'
 #' @param slug Dataset slug; see the `slug` column of [morie_data_catalog()].
-#' @return A `data.frame`.
-#' @seealso [morie_data_catalog()]
+#' @param refresh Re-read the file even if a cached copy exists.
+#' @param format `"csv"` (default) or `"parquet"`: which shipped copy to
+#'   read. Both give the same data frame.
+#' @return A data frame.
 #' @examples
-#' # Load a bundled lookup table by its slug.
-#' iucr <- morie_data_load("chicago_iucr_codes")
-#' str(iucr)
-#' head(iucr)
-#'
-#' # Any slug from the catalogue works the same way.
-#' hoods <- morie_data_load("chicago_neighborhoods")
-#' offense <- morie_data_load("nyc_nypd_offense_codes")
-#' nrow(hoods)
-#' nrow(offense)
-#'
-#' # Slugs are validated: an unknown one errors with guidance.
-#' try(morie_data_load("no_such_dataset"))
-#'
-#' # Pattern: pick a slug programmatically from the catalogue, then load it.
-#' cat <- morie_data_catalog()
-#' slug <- cat$slug[cat$kind == "table"][1]
-#' head(morie_data_load(slug))
+#' d <- morie_data_load("arsau_2023_uof_main_records")
+#' str(d[, 1:4])
 #' @export
-morie_data_load <- function(slug) {
-  if (is.null(slug) || length(slug) != 1L || is.na(slug) || !is.character(slug)) {
+morie_data_load <- function(slug, refresh = FALSE,
+                            format = c("csv", "parquet")) {
+  if (is.null(slug) || length(slug) != 1L || is.na(slug) ||
+      !is.character(slug)) {
     stop("`slug` must be a single dataset slug (character). ",
-      "See morie_data_catalog() for valid slugs.",
-      call. = FALSE
-    )
+         "See morie_data_catalog() for valid slugs.", call. = FALSE)
   }
-  f <- file.path(.rmoriedata_parquet_dir(), paste0(slug, ".parquet"))
-  if (!file.exists(f)) {
-    stop(sprintf(
-      "No dataset '%s'. See morie_data_catalog() for valid slugs.",
-      slug
-    ), call. = FALSE)
+  format <- match.arg(format)
+  key <- paste0("table:", format, ":", slug)
+  if (!isTRUE(refresh)) {
+    hit <- .rmoriedata_cache[[key]]
+    if (!is.null(hit)) return(hit)
   }
-  morie_read_parquet(f)
+  cat <- morie_data_catalog()
+  row <- cat[cat$slug == slug & cat$kind == "table", , drop = FALSE]
+  if (!nrow(row)) {
+    if (any(cat$slug == slug & cat$kind == "dictionary")) {
+      stop(sprintf(paste0("'%s' is a data dictionary, not a table: load it ",
+                          "with morie_data_dictionary(\"%s\")."), slug, slug),
+           call. = FALSE)
+    }
+    stop(sprintf("No dataset '%s'. See morie_data_catalog() for valid slugs.",
+                 slug), call. = FALSE)
+  }
+  if (format == "parquet") {
+    rel <- row$parquet_path[1L]
+    f <- file.path(.rmoriedata_extdata(), rel)
+    if (is.na(rel) || !nzchar(rel) || !file.exists(f)) {
+      stop(sprintf("The Parquet file for '%s' is missing; reinstall rmoriedata.",
+                   slug), call. = FALSE)
+    }
+    .rmoriedata_check_file(rel)
+    d <- as.data.frame(morie_read_parquet(f), stringsAsFactors = FALSE)
+  } else {
+    d <- .rmoriedata_csv(row$source_path[1L])
+    if (is.null(d)) {
+      stop(sprintf("The file for '%s' (%s) is missing; reinstall rmoriedata.",
+                   slug, row$source_path[1L]), call. = FALSE)
+    }
+    d <- .rmoriedata_apply_schema(d, slug)
+  }
+  assign(key, d, envir = .rmoriedata_cache)
+  d
 }
 
-#' Data dictionary (JSON) for a dataset, if one is bundled
+#' Path of a bundled table's shipped file
 #'
-#' @param slug Dictionary slug; see [morie_data_catalog()] rows where
-#'   `kind == "dictionary"`.
-#' @return A character scalar of JSON, or `NULL` if no dictionary exists.
-#' @seealso [morie_data_catalog()]
+#' The absolute path of the CSV or Parquet copy of a table, verified
+#' against the signed manifest first. The Parquet path is the bridge to
+#' Python: `pandas.read_parquet(path)` gives the same typed table
+#' [morie_data_load()] returns.
+#'
+#' @param slug Dataset slug; see the `slug` column of [morie_data_catalog()].
+#' @param format `"parquet"` (default) or `"csv"`.
+#' @return A length-1 character path.
 #' @examples
-#' # Which dictionaries are bundled?
-#' cat <- morie_data_catalog()
-#' dict_slugs <- cat$slug[cat$kind == "dictionary"]
-#' dict_slugs
+#' p <- morie_data_path("arsau_2023_uof_main_records")
+#' file.exists(p)
+#' basename(morie_data_path("arsau_2023_uof_main_records", "csv"))
+#' @export
+morie_data_path <- function(slug, format = c("parquet", "csv")) {
+  format <- match.arg(format)
+  if (is.null(slug) || length(slug) != 1L || is.na(slug) ||
+      !is.character(slug)) {
+    stop("`slug` must be a single dataset slug (character). ",
+         "See morie_data_catalog() for valid slugs.", call. = FALSE)
+  }
+  cat <- morie_data_catalog()
+  row <- cat[cat$slug == slug & cat$kind == "table", , drop = FALSE]
+  if (!nrow(row)) {
+    stop(sprintf("No dataset '%s'. See morie_data_catalog() for valid slugs.",
+                 slug), call. = FALSE)
+  }
+  rel <- if (format == "parquet") row$parquet_path[1L] else row$source_path[1L]
+  f <- file.path(.rmoriedata_extdata(), rel)
+  if (is.na(rel) || !nzchar(rel) || !file.exists(f)) {
+    stop(sprintf("The %s file for '%s' is missing; reinstall rmoriedata.",
+                 format, slug), call. = FALSE)
+  }
+  .rmoriedata_check_file(rel)
+  normalizePath(f, winslash = "/")
+}
+
+# Column names and classes come from the schema, by position: the CSV
+# header may carry a byte-order mark or characters make.names() would
+# mangle, and an all-NA column reads as logical where the table's type
+# is integer.
+.rmoriedata_apply_schema <- function(d, slug) {
+  s <- .rmoriedata_schema()
+  s <- s[s$slug == slug, , drop = FALSE]
+  if (!nrow(s)) return(d)
+  s <- s[order(s$position), , drop = FALSE]
+  if (nrow(s) != ncol(d)) {
+    stop(sprintf("schema for '%s' has %d columns but the file has %d",
+                 slug, nrow(s), ncol(d)), call. = FALSE)
+  }
+  names(d) <- s$name
+  for (j in seq_len(ncol(d))) {
+    cls <- s$class[j]
+    v <- d[[j]]
+    d[[j]] <- switch(cls,
+      integer = as.integer(v),
+      numeric = as.numeric(v),
+      logical = as.logical(v),
+      character = if (is.character(v)) v else as.character(v),
+      Date = as.Date(v),
+      v)
+  }
+  rownames(d) <- NULL
+  d
+}
+
+#' Data dictionary for a bundled dataset
 #'
-#' # Fetch one dictionary's JSON (returns a character scalar of JSON).
-#' if (length(dict_slugs)) {
-#'   js <- morie_data_dictionary(dict_slugs[1])
-#'   substr(js, 1, 200)
-#'   # Parse it if you have jsonlite:
-#'   if (requireNamespace("jsonlite", quietly = TRUE)) {
-#'     str(jsonlite::fromJSON(js), max.level = 1)
-#'   }
-#' }
-#'
-#' # Unknown / non-dictionary slug: informative message, returns NULL.
-#' morie_data_dictionary("no_such_dictionary")
+#' @param slug Dictionary slug; rows with `kind == "dictionary"` in
+#'   [morie_data_catalog()] list them.
+#' @return The dictionary as JSON text (a length-one character vector),
+#'   or `NULL` invisibly with a message when none is bundled.
+#' @examples
+#' d <- morie_data_dictionary("arsau_2023_dictionary")
+#' substr(d, 1, 60)
 #' @export
 morie_data_dictionary <- function(slug) {
-  d <- .rmoriedata_read("_dictionaries")
-  if (is.null(d)) {
+  cat <- morie_data_catalog()
+  row <- cat[cat$slug == slug & cat$kind == "dictionary", , drop = FALSE]
+  if (!nrow(row)) {
+    message("No dictionary bundled for '", slug,
+            "'. Rows with kind == \"dictionary\" in morie_data_catalog() ",
+            "list the ones available.")
+    return(invisible(NULL))
+  }
+  f <- file.path(.rmoriedata_extdata(), row$source_path[1L])
+  if (!file.exists(f)) {
     message("No data dictionaries are bundled in this installation.")
     return(invisible(NULL))
   }
-  row <- d[d$slug == slug, , drop = FALSE]
-  if (!nrow(row)) {
-    message(
-      "No dictionary bundled for '", slug,
-      "'. Rows with kind == \"dictionary\" in morie_data_catalog() ",
-      "list the ones available."
-    )
-    return(invisible(NULL))
-  }
-  row$dictionary_json[[1]]
+  .rmoriedata_check_file(row$source_path[1L])
+  txt <- readLines(f, warn = FALSE, encoding = "UTF-8")
+  paste(txt, collapse = "\n")
 }
+
+# Integrity. Every shipped file is listed with its SHA-256 in
+# `_checksums.csv`; the SHA-256 of that manifest is signed with an XMSS
+# (RFC 8391, SHA-256) key whose public half ships as `_signing_key.json`.
+# The signature is checked once per session and each file when it is
+# first read, so a modified or corrupted install fails loudly instead of
+# returning altered data. data-raw/sign_store.R produces the three files.
+
+.rmoriedata_json <- function(name, class) {
+  f <- file.path(.rmoriedata_extdata(), name)
+  if (!file.exists(f)) {
+    stop("rmoriedata's ", name, " is missing; reinstall rmoriedata.",
+         call. = FALSE)
+  }
+  txt <- paste(readLines(f, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+  out <- rmoriebricklayer::bricklayer_json_from_json(txt)
+  class(out) <- c(class, "list")
+  out
+}
+
+.rmoriedata_manifest <- function() {
+  m <- .rmoriedata_cache[["_manifest"]]
+  if (!is.null(m)) {
+    return(m)
+  }
+  f <- file.path(.rmoriedata_extdata(), "_checksums.csv")
+  if (!file.exists(f)) {
+    stop("rmoriedata's checksum manifest is missing; reinstall rmoriedata.",
+         call. = FALSE)
+  }
+  bytes <- readBin(f, "raw", n = file.size(f))
+  sig <- .rmoriedata_json("_checksums.sig", "bricklayer_signature")
+  pub <- .rmoriedata_json("_signing_key.json", "bricklayer_public_key")
+  # The trust root is pinned here, not read from the same directory the
+  # signature protects: a consistent re-sign of extdata with another key
+  # would otherwise verify. Changing the signing key means changing this
+  # constant in package code, which is the visible change it should be.
+  root_ok <- identical(as.character(pub$root), .rmoriedata_signing_root)
+  seed_ok <- identical(as.character(pub$pub_seed), .rmoriedata_signing_seed)
+  if (!root_ok || !seed_ok) {
+    stop("rmoriedata's shipped signing key does not match the root pinned ",
+         "in the package: the installed data store has been re-signed. ",
+         "Reinstall rmoriedata.", call. = FALSE)
+  }
+  ok <- rmoriebricklayer::capsule_verify(rmoriebricklayer::core_sha256(bytes),
+                                         sig, pub)
+  if (!isTRUE(ok)) {
+    stop("rmoriedata's checksum manifest does not verify against the ",
+         "package's signing key: the installed data store has been ",
+         "modified. Reinstall rmoriedata.", call. = FALSE)
+  }
+  m <- utils::read.csv(f, stringsAsFactors = FALSE,
+                       colClasses = c("character", "numeric", "character"))
+  assign("_manifest", m, envir = .rmoriedata_cache)
+  assign("_verified", character(0), envir = .rmoriedata_cache)
+  m
+}
+
+.rmoriedata_check_file <- function(rel) {
+  if (rel %in% .rmoriedata_cache[["_verified"]]) {
+    return(invisible(TRUE))
+  }
+  m <- .rmoriedata_manifest()
+  row <- m[m$path == rel, , drop = FALSE]
+  if (!nrow(row)) {
+    stop(sprintf("'%s' is not in rmoriedata's signed manifest.", rel),
+         call. = FALSE)
+  }
+  got <- rmoriebricklayer::sha256_file(file.path(.rmoriedata_extdata(), rel))
+  if (!identical(got, row$sha256[1L])) {
+    stop(sprintf(paste0("rmoriedata's bundled file '%s' does not match the ",
+                        "signed manifest (expected sha256 %s, got %s): the ",
+                        "installed copy has been modified or corrupted. ",
+                        "Reinstall rmoriedata."),
+                 rel, row$sha256[1L], got), call. = FALSE)
+  }
+  assign("_verified", c(.rmoriedata_cache[["_verified"]], rel),
+         envir = .rmoriedata_cache)
+  invisible(TRUE)
+}
+
+.rmoriedata_reset_cache <- function() {
+  rm(list = ls(.rmoriedata_cache, all.names = TRUE), envir = .rmoriedata_cache)
+  invisible(NULL)
+}
+
+#' Verify the bundled data store against its signed manifest
+#'
+#' Every file rmoriedata ships is listed with its SHA-256 in a manifest,
+#' and the manifest is signed with an XMSS (RFC 8391, SHA-256) key whose
+#' public half ships with the package. Loading a table checks its file
+#' against the manifest; this function checks all of them at once.
+#'
+#' @return A data frame with one row per manifest entry: `path`, `bytes`,
+#'   `sha256`, `ok` (the file on disk matches). The attribute
+#'   `"signature"` is `TRUE` when the manifest's signature verified, and
+#'   the function errors if it did not.
+#' @examples
+#' v <- morie_data_verify()
+#' all(v$ok)
+#' attr(v, "signature")
+#' @export
+morie_data_verify <- function() {
+  m <- .rmoriedata_manifest()
+  ed <- .rmoriedata_extdata()
+  m$ok <- vapply(seq_len(nrow(m)), function(i) {
+    f <- file.path(ed, m$path[i])
+    file.exists(f) &&
+      identical(rmoriebricklayer::sha256_file(f), m$sha256[i])
+  }, TRUE)
+  attr(m, "signature") <- TRUE
+  m
+}
+
+# XMSS public root and public seed of the store's signing key (RFC 8391,
+# SHA-256). Pinned in code so the verifier's trust anchor does not travel
+# with the data it verifies.
+.rmoriedata_signing_root <- paste0("bee8b88de2e19b5bafa398f1ccc0d48d",
+                                   "a5ee75e561e6b39d06f5e8b2421bd23d")
+.rmoriedata_signing_seed <- paste0("9e5d6ac1acea1d247139755cd3956889",
+                                   "0c894c113b095b285be7a8b12ad9a539")

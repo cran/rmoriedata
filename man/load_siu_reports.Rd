@@ -5,9 +5,9 @@
 \title{Load the Ontario SIU director's-report corpus}
 \source{
 Ontario Special Investigations Unit director's reports,
-  \url{https://www.siu.on.ca/en/directors_reports.php} (post-2018)
-  and the Ontario Government archive (pre-2018). Parsed with the
-  \pkg{rmorie} SIU subsystem.
+\url{https://www.siu.on.ca/en/directors_reports.php} (post-2018)
+and the Ontario Government archive (pre-2018). Parsed with the
+\pkg{rmorie} SIU subsystem.
 }
 \usage{
 load_siu_reports(
@@ -23,9 +23,8 @@ load_siu_reports(
 \item{as}{Return format: \code{"data.frame"} (default) or
 \code{"tibble"}.}
 
-\item{format}{Bundle to read: \code{"csv"} (default, the gzip CSV) or
-\code{"parquet"} (columnar, via \pkg{nanoparquet}). Both hold the
-identical corpus.}
+\item{format}{\code{"csv"} (the gzip CSV, default) or \code{"parquet"}
+(the same rows and columns, native codec).}
 }
 \value{
 A \code{data.frame} (or tibble) of SIU director's-report rows.
@@ -43,7 +42,7 @@ flag.
 For every English report (\code{panel_reviewed == "TRUE"}), the 16
 key columns were verified by a multi-agent LLM review panel against
 the full report text and the parser's guess resolved to the correct
-value; the subject-official count is filled for 100\% of English
+value; the subject-official count is filled for 100\\% of English
 reports (witness-officer-only investigations are a genuine 0). French
 reports carry the parser values. See the \code{siu} pipeline repo for
 the audit provenance.
@@ -54,6 +53,15 @@ open-source pipeline for the SIU director's-report corpus, created
 by Vansh Singh Ruhela as part of the MORIE / MRM framework. The
 table is regenerated from the parser over the full public corpus;
 see \code{rmorie::morie_fetch_siu()} to rebuild it live.
+
+This loader returns the corpus as text: every column is character and
+an empty cell is \code{""}, which is the form the SIU parser writes and
+\pkg{rmorie} reads back. The same table is also in the typed data
+store: \code{morie_data_load("siu_directors_reports")} applies the
+bundled schema (integer \code{drid} and counts, \code{NA} for empty
+cells), so counts of missing values differ between the two entry
+points by construction; pick the typed store for analysis and this
+loader for the parser round trip.
 }
 \examples{
 # Default: every parsed report, as a base data.frame.
@@ -62,9 +70,10 @@ nrow(all)
 ncol(all)
 
 # `lang` filters the corpus by report language.
-en <- load_siu_reports(lang = "en")   # English director's reports
-fr <- load_siu_reports(lang = "fr")   # French director's reports
-nrow(en); nrow(fr)
+en <- load_siu_reports(lang = "en") # English director's reports
+fr <- load_siu_reports(lang = "fr") # French director's reports
+nrow(en)
+nrow(fr)
 
 # `as = "tibble"` returns a tibble when the tibble package is present.
 if (requireNamespace("tibble", quietly = TRUE)) {

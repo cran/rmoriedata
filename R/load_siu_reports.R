@@ -26,13 +26,21 @@
 #' table is regenerated from the parser over the full public corpus;
 #' see \code{rmorie::morie_fetch_siu()} to rebuild it live.
 #'
+#' This loader returns the corpus as text: every column is character and
+#' an empty cell is \code{""}, which is the form the SIU parser writes and
+#' \pkg{rmorie} reads back. The same table is also in the typed data
+#' store: \code{morie_data_load("siu_directors_reports")} applies the
+#' bundled schema (integer \code{drid} and counts, \code{NA} for empty
+#' cells), so counts of missing values differ between the two entry
+#' points by construction; pick the typed store for analysis and this
+#' loader for the parser round trip.
+#'
 #' @param lang One of \code{"all"} (default), \code{"en"}, or
 #'   \code{"fr"}: filter to the English-only, French-only, or all rows.
 #' @param as Return format: \code{"data.frame"} (default) or
 #'   \code{"tibble"}.
-#' @param format Bundle to read: \code{"csv"} (default, the gzip CSV) or
-#'   \code{"parquet"} (columnar, native codec). Both hold the
-#'   identical corpus.
+#' @param format \code{"csv"} (the gzip CSV, default) or \code{"parquet"}
+#'   (the same rows and columns, native codec).
 #' @return A \code{data.frame} (or tibble) of SIU director's-report rows.
 #' @source Ontario Special Investigations Unit director's reports,
 #'   \url{https://www.siu.on.ca/en/directors_reports.php} (post-2018)
@@ -68,35 +76,29 @@ load_siu_reports <- function(lang = c("all", "en", "fr"),
   lang <- match.arg(lang)
   as <- match.arg(as)
   format <- match.arg(format)
-  if (format == "parquet") {
-    # The corpus lives once, in the Parquet store that morie_data_load()
-    # reads. It used to be shipped a second time at the top of extdata,
-    # byte-identical, costing 0.7 MB of the source tarball for nothing.
-    ppath <- system.file("extdata", "parquet", "siu_directors_reports.parquet",
-      package = "rmoriedata"
-    )
-    if (!nzchar(ppath)) {
-      ppath <- system.file("extdata", "siu_directors_reports.parquet",
-        package = "rmoriedata"
-      )
-    }
-    if (!nzchar(ppath)) {
-      stop("bundled SIU parquet corpus not found in rmoriedata", call. = FALSE)
-    }
-    df <- as.data.frame(morie_read_parquet(ppath),
-      stringsAsFactors = FALSE
-    )
+  rel <- if (format == "parquet") {
+    "parquet/siu_directors_reports_corpus.parquet"
   } else {
-    path <- system.file("extdata", "siu_directors_reports.csv.gz",
-      package = "rmoriedata"
+    "siu_directors_reports.csv.gz"
+  }
+  path <- system.file("extdata", rel, package = "rmoriedata")
+  if (!nzchar(path)) {
+    stop("bundled SIU director's-report corpus not found in rmoriedata",
+      call. = FALSE
     )
-    if (!nzchar(path)) {
-      stop("bundled SIU director's-report corpus not found in rmoriedata",
-        call. = FALSE
-      )
-    }
-    df <- utils::read.csv(gzfile(path),
-      stringsAsFactors = FALSE,
+  }
+  .rmoriedata_check_file(rel)
+  df <- if (format == "parquet") {
+    d <- as.data.frame(morie_read_parquet(path), stringsAsFactors = FALSE)
+    d[] <- lapply(d, function(z) {
+      z <- as.character(z)
+      z[is.na(z)] <- ""
+      z
+    })
+    d
+  } else {
+    utils::read.csv(gzfile(path),
+      stringsAsFactors = FALSE, encoding = "UTF-8",
       colClasses = "character", check.names = FALSE
     )
   }
