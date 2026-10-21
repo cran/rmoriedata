@@ -14,7 +14,7 @@ synth_df <- function() {
 
 test_that("k_anonymity returns the expected class sizes", {
   df <- synth_df()
-  result <- morie_k_anonymity_verify(df, c("age", "sex"), k = 2)
+  result <- kanonvrf(df, c("age", "sex"), k = 2)
   expect_s3_class(result, "morie_k_anon")
   expect_equal(result$n_classes, 3L)
   expect_equal(result$min_class_size, 1L)
@@ -29,14 +29,14 @@ test_that("k_anonymity returns the expected class sizes", {
 
 test_that("k_anonymity with k=1 always satisfies non-empty data", {
   df <- synth_df()
-  result <- morie_k_anonymity_verify(df, c("age", "sex"), k = 1)
+  result <- kanonvrf(df, c("age", "sex"), k = 1)
   expect_true(result$satisfies)
   expect_equal(result$n_violations, 0L)
 })
 
 test_that("k_anonymity with k larger than every class fails", {
   df <- synth_df()
-  result <- morie_k_anonymity_verify(df, c("age", "sex"), k = 100)
+  result <- kanonvrf(df, c("age", "sex"), k = 100)
   expect_false(result$satisfies)
   expect_equal(result$n_violations, result$n_classes)
 })
@@ -44,23 +44,23 @@ test_that("k_anonymity with k larger than every class fails", {
 test_that("k_anonymity input validation", {
   df <- synth_df()
   expect_error(
-    morie_k_anonymity_verify(list(a = 1), "a"),
+    kanonvrf(list(a = 1), "a"),
     "data.frame"
   )
   expect_error(
-    morie_k_anonymity_verify(df, character(0)),
+    kanonvrf(df, character(0)),
     "non-empty character vector"
   )
   expect_error(
-    morie_k_anonymity_verify(df, "not_a_column"),
+    kanonvrf(df, "not_a_column"),
     "Columns not found"
   )
   expect_error(
-    morie_k_anonymity_verify(df, "age", k = 0),
+    kanonvrf(df, "age", k = 0),
     "positive integer"
   )
   expect_error(
-    morie_k_anonymity_verify(df, "age", k = 2.5),
+    kanonvrf(df, "age", k = 2.5),
     "positive integer"
   )
 })
@@ -74,35 +74,35 @@ test_that("l_diversity computes correct per-class distinct counts", {
   )
   # (25,F) -> distinct {A,B,C} = 3
   # (32,M) -> distinct {X,Y,Z} = 3
-  result <- morie_l_diversity_verify(df, c("age", "sex"), "dx", l = 3)
+  result <- ldivvrf(df, c("age", "sex"), "dx", l = 3)
   expect_s3_class(result, "morie_l_div")
   expect_true(result$satisfies)
   expect_equal(result$min_diversity, 3L)
   expect_equal(result$n_violations, 0L)
 
   # Tightening to l=4 should violate both classes.
-  result_strict <- morie_l_diversity_verify(df, c("age", "sex"), "dx", l = 4)
+  result_strict <- ldivvrf(df, c("age", "sex"), "dx", l = 4)
   expect_false(result_strict$satisfies)
   expect_equal(result_strict$n_violations, 2L)
 })
 
 test_that("l_diversity input validation", {
   df <- data.frame(a = 1:3, s = c("x", "y", "z"))
-  expect_error(morie_l_diversity_verify(list(), "a", "s"), "data.frame")
+  expect_error(ldivvrf(list(), "a", "s"), "data.frame")
   expect_error(
-    morie_l_diversity_verify(df, character(0), "s"),
+    ldivvrf(df, character(0), "s"),
     "non-empty character vector"
   )
   expect_error(
-    morie_l_diversity_verify(df, "a", c("s", "extra")),
+    ldivvrf(df, "a", c("s", "extra")),
     "single column name"
   )
   expect_error(
-    morie_l_diversity_verify(df, "missing", "s"),
+    ldivvrf(df, "missing", "s"),
     "Columns not found"
   )
   expect_error(
-    morie_l_diversity_verify(df, "a", "s", l = 0),
+    ldivvrf(df, "a", "s", l = 0),
     "positive integer"
   )
 })
@@ -117,8 +117,8 @@ test_that("cell_suppress suppresses primary cells below threshold", {
     nrow = 3, byrow = TRUE,
     dimnames = list(c("A", "B", "C"), c("X", "Y", "Z"))
   )
-  res <- morie_cell_suppress(tbl, threshold = 5, return_complementary = FALSE)
-  expect_s3_class(res, "morie_cell_suppress")
+  res <- cellsupp(tbl, threshold = 5, retcomp = FALSE)
+  expect_s3_class(res, "cellsupp")
   expect_equal(res$n_primary, 2L)
   expect_equal(res$n_complementary, 0L)
   expect_true(is.na(res$suppressed["B", "X"]))
@@ -128,11 +128,9 @@ test_that("cell_suppress suppresses primary cells below threshold", {
   expect_equal(res$suppressed["B", "Y"], 99)
 })
 
-test_that("complementary suppression hides reconstructability per row + col", {
-  # One small cell in row 'B' (value 3 < 5). The remaining row-B cells are
-  # 99 and 14; complementary picks the smallest -> 14 -> "B","Z".
-  # The same primary cell anchors column 'X' (other cells 120, 51);
-  # complementary picks the smallest -> 51 -> "C","X".
+test_that("complementary suppression leaves no hidden cell recoverable from the totals", {
+  # One small cell in row B. The 0.3.5 passes hid one complement in row B and one in
+  # column X and stopped: row C then held a lone hidden cell, readable off row C's total.
   tbl <- matrix(
     c(
       120, 47, 88,
@@ -142,38 +140,82 @@ test_that("complementary suppression hides reconstructability per row + col", {
     nrow = 3, byrow = TRUE,
     dimnames = list(c("A", "B", "C"), c("X", "Y", "Z"))
   )
-  res <- morie_cell_suppress(tbl, threshold = 5, return_complementary = TRUE)
+  res <- cellsupp(tbl, threshold = 5, retcomp = TRUE)
   expect_equal(res$n_primary, 1L)
-  # one row-comp + one col-comp = 2 complementary suppressions
-  expect_equal(res$n_complementary, 2L)
-  expect_true(is.na(res$suppressed["B", "X"])) # primary
-  expect_true(is.na(res$suppressed["B", "Z"])) # row complement (min of 99,14)
-  expect_true(is.na(res$suppressed["C", "X"])) # col complement (min of 120,51)
-  # Untouched cells preserved.
-  expect_equal(res$suppressed["A", "X"], 120)
-  expect_equal(res$suppressed["A", "Y"], 47)
-  expect_equal(res$suppressed["A", "Z"], 88)
-  expect_equal(res$suppressed["B", "Y"], 99)
-  expect_equal(res$suppressed["C", "Y"], 60)
-  expect_equal(res$suppressed["C", "Z"], 60)
+  expect_true(is.na(res$suppressed["B", "X"]))
+  expect_true(res$protected)
+  expect_equal(res$n_recoverable, 0L)
+  hidden <- is.na(res$suppressed)
+  # no row or column holds exactly one hidden cell
+  expect_false(any(rowSums(hidden) == 1L))
+  expect_false(any(colSums(hidden) == 1L))
+  # published cells are untouched
+  expect_equal(res$suppressed[!hidden], tbl[!hidden])
+  # without complements the lone cell is recoverable, and the result says so
+  bare <- cellsupp(tbl, threshold = 5, retcomp = FALSE)
+  expect_false(bare$protected)
+  expect_true(bare$recoverable_mask["B", "X"])
+})
+
+test_that("a primary cell is not recoverable from the margins (review reproducer)", {
+  # 0.3.5 published (NA NA 57 / NA 10 10 / 90 5 5): R2C1 = 100 - 20 = 80, then
+  # R1C1 = 173 - 90 - 80 = 3, the primary cell, exactly
+  tbl <- matrix(c(3, 40, 57, 80, 10, 10, 90, 5, 5), nrow = 3, byrow = TRUE,
+                dimnames = list(c("R1", "R2", "R3"), c("C1", "C2", "C3")))
+  res <- cellsupp(tbl, threshold = 5)
+  expect_true(is.na(res$suppressed["R1", "C1"]))
+  expect_true(res$protected)
+  hidden <- is.na(res$suppressed)
+  expect_false(any(rowSums(hidden) == 1L))
+  expect_false(any(colSums(hidden) == 1L))
+  # complements are never zero cells
+  expect_false(any(tbl[res$complementary_mask] == 0))
+})
+
+test_that("k-anonymity counts rows with a missing quasi-identifier (review reproducer)", {
+  d <- data.frame(zip = c(NA, NA, NA, "60601", "60601", "60601", "60601", "60601"),
+                  sex = c("M", "F", "M", "F", "F", "F", "F", "F"))
+  r <- kanonvrf(d, c("zip", "sex"), k = 3)
+  expect_false(r$satisfies)
+  expect_equal(r$min_class_size, 1L)
+  expect_equal(r$n_classes, 3L)
+  expect_true(any(is.na(r$violating_classes$zip)))
+  # every row is accounted for
+  # at k = 1 every class passes, the NA classes included
+  expect_true(kanonvrf(d, c("zip", "sex"), k = 1)$satisfies)
+})
+
+test_that("l-diversity counts only known sensitive values (review reproducer)", {
+  C <- data.frame(
+    g = c("a", "a", "a", "b", "b", "b"),
+    s = c("HIV", NA, NA, "FLU", "FLU", NA)
+  )
+  r <- ldivvrf(C, "g", "s", l = 2)
+  expect_false(r$satisfies)
+  expect_equal(r$min_diversity, 1L)
+  # a missing quasi-identifier is its own class here too
+  D <- data.frame(g = c("a", "a", NA, NA), s = c("x", "y", "z", "z"))
+  r2 <- ldivvrf(D, "g", "s", l = 2)
+  expect_equal(r2$n_classes, 2L)
+  expect_false(r2$satisfies)
 })
 
 test_that("cell_suppress input validation", {
   tbl <- matrix(1:9, nrow = 3)
   expect_error(
-    morie_cell_suppress(tbl, threshold = 0),
+    cellsupp(tbl, threshold = 0),
     "positive number"
   )
   expect_error(
-    morie_cell_suppress(tbl,
+    cellsupp(tbl,
       threshold = 5,
-      return_complementary = NA
+      retcomp = NA
     ),
     "TRUE or FALSE"
   )
   char_tbl <- matrix(letters[1:9], nrow = 3)
   expect_error(
-    morie_cell_suppress(char_tbl, threshold = 5),
+    cellsupp(char_tbl, threshold = 5),
     "numeric matrix or table"
   )
 })

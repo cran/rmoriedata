@@ -2,7 +2,7 @@
 # column schema beside them.
 #
 # Every table ships once, as the CSV that rmorie reads by file name.
-# morie_data_load() reads that CSV and applies the column names and
+# mdload() reads that CSV and applies the column names and
 # classes recorded in `_schema.csv`, so the result is typed the way the
 # retired parquet copies were, and it keeps the result in a session cache
 # so repeated loads cost nothing. Dictionaries are the JSON files the
@@ -49,15 +49,19 @@
 #' One row per bundled table or dictionary: `slug`, `source_path`
 #' (relative to the package's `extdata` directory), `kind`, and for
 #' tables `n_rows`, `n_cols` and `parquet_path` (the same table as a
-#' Parquet file, see [morie_data_path()]).
+#' Parquet file, see [mdpath()]).
 #'
-#' @return A data frame.
+#' @return A data frame: `slug`, `source_path`, `kind` (table, dictionary, ...),
+#'   `n_rows`, `n_cols`, `parquet_path`, and `synthetic`, TRUE for the tables that are
+#'   generated stand-ins with the published schema rather than published data (the
+#'   ARSAU use-of-force tables and the `*_synthetic` ones).
 #' @examples
-#' cat <- morie_data_catalog()
+#' cat <- mdcat()
+#' cat$slug[cat$synthetic]
 #' tbls <- cat[cat$kind == "table", c("slug", "n_rows", "n_cols")]
 #' head(tbls[order(-tbls$n_rows), ])
 #' @export
-morie_data_catalog <- function() {
+mdcat <- function() {
   cat <- .rmoriedata_cache[["_catalog"]]
   if (is.null(cat)) {
     cat <- .rmoriedata_csv("_catalog.csv")
@@ -67,6 +71,7 @@ morie_data_catalog <- function() {
     }
     cat$n_rows <- as.integer(cat$n_rows)
     cat$n_cols <- as.integer(cat$n_cols)
+    if (!is.null(cat$synthetic)) cat$synthetic <- as.logical(cat$synthetic)
     assign("_catalog", cat, envir = .rmoriedata_cache)
   }
   cat
@@ -82,21 +87,21 @@ morie_data_catalog <- function() {
 #' of a table is cached for the session; later calls return the cached
 #' copy unless `refresh = TRUE`.
 #'
-#' @param slug Dataset slug; see the `slug` column of [morie_data_catalog()].
+#' @param slug Dataset slug; see the `slug` column of [mdcat()].
 #' @param refresh Re-read the file even if a cached copy exists.
 #' @param format `"csv"` (default) or `"parquet"`: which shipped copy to
 #'   read. Both give the same data frame.
 #' @return A data frame.
 #' @examples
-#' d <- morie_data_load("arsau_2023_uof_main_records")
+#' d <- mdload("arsau_2023_uof_main_records")
 #' str(d[, 1:4])
 #' @export
-morie_data_load <- function(slug, refresh = FALSE,
+mdload <- function(slug, refresh = FALSE,
                             format = c("csv", "parquet")) {
   if (is.null(slug) || length(slug) != 1L || is.na(slug) ||
       !is.character(slug)) {
     stop("`slug` must be a single dataset slug (character). ",
-         "See morie_data_catalog() for valid slugs.", call. = FALSE)
+         "See mdcat() for valid slugs.", call. = FALSE)
   }
   format <- match.arg(format)
   key <- paste0("table:", format, ":", slug)
@@ -104,15 +109,15 @@ morie_data_load <- function(slug, refresh = FALSE,
     hit <- .rmoriedata_cache[[key]]
     if (!is.null(hit)) return(hit)
   }
-  cat <- morie_data_catalog()
+  cat <- mdcat()
   row <- cat[cat$slug == slug & cat$kind == "table", , drop = FALSE]
   if (!nrow(row)) {
     if (any(cat$slug == slug & cat$kind == "dictionary")) {
       stop(sprintf(paste0("'%s' is a data dictionary, not a table: load it ",
-                          "with morie_data_dictionary(\"%s\")."), slug, slug),
+                          "with mddict(\"%s\")."), slug, slug),
            call. = FALSE)
     }
-    stop(sprintf("No dataset '%s'. See morie_data_catalog() for valid slugs.",
+    stop(sprintf("No dataset '%s'. See mdcat() for valid slugs.",
                  slug), call. = FALSE)
   }
   if (format == "parquet") {
@@ -141,30 +146,33 @@ morie_data_load <- function(slug, refresh = FALSE,
 #' The absolute path of the CSV or Parquet copy of a table, verified
 #' against the signed manifest first. The Parquet path is the bridge to
 #' Python: `pandas.read_parquet(path)` gives the same typed table
-#' [morie_data_load()] returns.
+#' [mdload()] returns.
 #'
-#' @param slug Dataset slug; see the `slug` column of [morie_data_catalog()].
-#' @param format `"parquet"` (default) or `"csv"`.
+#' @param slug Dataset slug; see the `slug` column of [mdcat()].
+#' @param format `"parquet"` (default) or `"csv"`. A dictionary or other non-table
+#'   slug has one file, which is returned either way.
 #' @return A length-1 character path.
 #' @examples
-#' p <- morie_data_path("arsau_2023_uof_main_records")
+#' p <- mdpath("arsau_2023_uof_main_records")
 #' file.exists(p)
-#' basename(morie_data_path("arsau_2023_uof_main_records", "csv"))
+#' basename(mdpath("arsau_2023_uof_main_records", "csv"))
 #' @export
-morie_data_path <- function(slug, format = c("parquet", "csv")) {
+mdpath <- function(slug, format = c("parquet", "csv")) {
   format <- match.arg(format)
   if (is.null(slug) || length(slug) != 1L || is.na(slug) ||
       !is.character(slug)) {
     stop("`slug` must be a single dataset slug (character). ",
-         "See morie_data_catalog() for valid slugs.", call. = FALSE)
+         "See mdcat() for valid slugs.", call. = FALSE)
   }
-  cat <- morie_data_catalog()
-  row <- cat[cat$slug == slug & cat$kind == "table", , drop = FALSE]
+  cat <- mdcat()
+  row <- cat[cat$slug == slug, , drop = FALSE]
   if (!nrow(row)) {
-    stop(sprintf("No dataset '%s'. See morie_data_catalog() for valid slugs.",
+    stop(sprintf("No dataset '%s'. See mdcat() for valid slugs.",
                  slug), call. = FALSE)
   }
-  rel <- if (format == "parquet") row$parquet_path[1L] else row$source_path[1L]
+  # a dictionary or document is its one file; only a table has a parquet copy
+  table <- row$kind[1L] == "table"
+  rel <- if (format == "parquet" && table) row$parquet_path[1L] else row$source_path[1L]
   f <- file.path(.rmoriedata_extdata(), rel)
   if (is.na(rel) || !nzchar(rel) || !file.exists(f)) {
     stop(sprintf("The %s file for '%s' is missing; reinstall rmoriedata.",
@@ -206,19 +214,19 @@ morie_data_path <- function(slug, format = c("parquet", "csv")) {
 #' Data dictionary for a bundled dataset
 #'
 #' @param slug Dictionary slug; rows with `kind == "dictionary"` in
-#'   [morie_data_catalog()] list them.
+#'   [mdcat()] list them.
 #' @return The dictionary as JSON text (a length-one character vector),
 #'   or `NULL` invisibly with a message when none is bundled.
 #' @examples
-#' d <- morie_data_dictionary("arsau_2023_dictionary")
+#' d <- mddict("arsau_2023_dictionary")
 #' substr(d, 1, 60)
 #' @export
-morie_data_dictionary <- function(slug) {
-  cat <- morie_data_catalog()
+mddict <- function(slug) {
+  cat <- mdcat()
   row <- cat[cat$slug == slug & cat$kind == "dictionary", , drop = FALSE]
   if (!nrow(row)) {
     message("No dictionary bundled for '", slug,
-            "'. Rows with kind == \"dictionary\" in morie_data_catalog() ",
+            "'. Rows with kind == \"dictionary\" in mdcat() ",
             "list the ones available.")
     return(invisible(NULL))
   }
@@ -246,7 +254,7 @@ morie_data_dictionary <- function(slug) {
          call. = FALSE)
   }
   txt <- paste(readLines(f, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
-  out <- rmoriebricklayer::bricklayer_json_from_json(txt)
+  out <- .rmd_bl("fromjs")(txt)
   class(out) <- c(class, "list")
   out
 }
@@ -275,7 +283,7 @@ morie_data_dictionary <- function(slug) {
          "in the package: the installed data store has been re-signed. ",
          "Reinstall rmoriedata.", call. = FALSE)
   }
-  ok <- rmoriebricklayer::capsule_verify(rmoriebricklayer::core_sha256(bytes),
+  ok <- .rmd_bl("cpsvrf")(.rmd_bl("csha256")(bytes),
                                          sig, pub)
   if (!isTRUE(ok)) {
     stop("rmoriedata's checksum manifest does not verify against the ",
@@ -299,7 +307,7 @@ morie_data_dictionary <- function(slug) {
     stop(sprintf("'%s' is not in rmoriedata's signed manifest.", rel),
          call. = FALSE)
   }
-  got <- rmoriebricklayer::sha256_file(file.path(.rmoriedata_extdata(), rel))
+  got <- .rmd_bl("sha256file")(file.path(.rmoriedata_extdata(), rel))
   if (!identical(got, row$sha256[1L])) {
     stop(sprintf(paste0("rmoriedata's bundled file '%s' does not match the ",
                         "signed manifest (expected sha256 %s, got %s): the ",
@@ -324,23 +332,41 @@ morie_data_dictionary <- function(slug) {
 #' public half ships with the package. Loading a table checks its file
 #' against the manifest; this function checks all of them at once.
 #'
-#' @return A data frame with one row per manifest entry: `path`, `bytes`,
-#'   `sha256`, `ok` (the file on disk matches). The attribute
-#'   `"signature"` is `TRUE` when the manifest's signature verified, and
-#'   the function errors if it did not.
+#' A file present in the installed store but absent from the manifest is
+#' reported too, as a row with `listed = FALSE` and `ok = FALSE`: a file
+#' added to the store is as much a change as a file altered in it.
+#'
+#' @return A data frame with one row per manifest entry, then one per
+#'   unlisted file: `path`, `bytes`, `sha256` (the manifest digest, or the
+#'   file's own for an unlisted file), `listed`, `ok` (the file on disk is
+#'   listed and matches). The attribute `"signature"` is `TRUE` when the
+#'   manifest's signature verified, and the function errors if it did not.
 #' @examples
-#' v <- morie_data_verify()
+#' v <- mdverify()
 #' all(v$ok)
 #' attr(v, "signature")
 #' @export
-morie_data_verify <- function() {
+mdverify <- function() {
   m <- .rmoriedata_manifest()
   ed <- .rmoriedata_extdata()
+  m$listed <- rep(TRUE, nrow(m))
   m$ok <- vapply(seq_len(nrow(m)), function(i) {
     f <- file.path(ed, m$path[i])
     file.exists(f) &&
-      identical(rmoriebricklayer::sha256_file(f), m$sha256[i])
+      identical(.rmd_bl("sha256file")(f), m$sha256[i])
   }, TRUE)
+  # the manifest, its signature and the public key are the trust machinery, not data
+  present <- list.files(ed, recursive = TRUE)
+  trust <- c("_checksums.csv", "_checksums.sig", "_signing_key.json")
+  extra <- setdiff(present, c(m$path, trust))
+  if (length(extra)) {
+    fx <- file.path(ed, extra)
+    m <- rbind(m, data.frame(
+      path = extra, bytes = file.size(fx),
+      sha256 = vapply(fx, .rmd_bl("sha256file"), character(1), USE.NAMES = FALSE),
+      listed = FALSE, ok = FALSE, stringsAsFactors = FALSE
+    )[names(m)])
+  }
   attr(m, "signature") <- TRUE
   m
 }

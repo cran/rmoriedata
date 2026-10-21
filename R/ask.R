@@ -1,56 +1,86 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-#' Ask the rmorie agent about the bundled datasets
+#' Ask a language model about the bundled datasets
 #'
-#' Convenience wrapper that forwards a dataset-focused question to the
-#' \code{rmorie} command-line agent (optional binary from rmorie-cli). See
-#' \code{rmorie::agent} for the full interface and requirements.
+#' Sends a question through \code{rmoriebricklayer::llmask()},
+#' to a language model you bring: an OpenAI-compatible endpoint of your own,
+#' a provider whose key is set (OpenAI, Anthropic, Google Gemini, OpenRouter,
+#' Groq, Mistral and more: \code{rmoriebricklayer::llmprvd()}),
+#' or an Ollama server. Nothing is sent anywhere you did not set up.
+#' The model is given every function of rmoriedata and rmoriebricklayer and
+#' tools to read their help, and this package's catalogue of datasets, so it
+#' can name the tables and write the code that loads them.
+#' \code{rmoriebricklayer::llmstat()} shows which route would
+#' answer; \code{\link{mdllmconf}()} (or \code{rmbl config setup}
+#' from the shell) saves a provider's key, the route and the model.
 #'
 #' @param question Character scalar.
-#' @param model Optional model id (see \code{rmorie::agent}).
-#' @param backend Optional backend override (see \code{rmorie::agent}).
-#' @return Character scalar: the agent's output, or a message if the
-#'   \code{rmorie} binary is not installed.
+#' @param model Optional model name; the route's model when \code{NULL}.
+#' @param route \code{NULL} or \code{"auto"} (the first route that is set up),
+#'   \code{"own"}, \code{"ollama"} or a provider id such as
+#'   \code{"anthropic"} (that route only).
+#' @return Character scalar: the answer, or a sentence saying what went wrong
+#'   or what to set up (never an error, so a script keeps going).
 #' @examples
-#' \donttest{
-#' # Routed to the optional rmorie CLI agent when it is installed; with no
-#' # binary on PATH each call returns an install hint instantly (no error,
-#' # no network), so this is safe to execute anywhere.
-#' # Plain question -> routed to the rmorie CLI agent (auto backend).
-#' ask("which bundled datasets cover Toronto police use-of-force?")
-#'
-#' # Pin a specific model.
-#' ask("summarise the SIU director's-report corpus", model = "gpt-4o-mini")
-#'
-#' # Force a backend (see rmorie::agent for the available values).
-#' ask("list the Chicago datasets", backend = "ollama")
+#' \dontrun{
+#' # These need a language model: a provider's key, Ollama, or your own server.
+#' Sys.setenv(ANTHROPIC_API_KEY = "...")
+#' mdask("which bundled datasets cover Toronto police use-of-force?")
+#' mdask("summarise the SIU director's-report corpus", route = "ollama",
+#'     model = "qwen3:8b")
 #' }
 #'
-#' # With no rmorie binary on PATH the call returns an install hint, not an
-#' # error -- safe to run anywhere:
-#' if (!nzchar(Sys.which("rmorie"))) ask("hello")
+#' # With no route set up the call returns a setup hint, not an error, and
+#' # reaches no network:
+#' if ("llmstat" %in% getNamespaceExports("rmoriebricklayer")) {
+#'   old <- Sys.getenv(c("OLLAMA_HOST", "MORIE_LLM_BASE_URL"), unset = NA)
+#'   Sys.setenv(OLLAMA_HOST = "off", MORIE_LLM_BASE_URL = "off")
+#'   if (!nrow(subset(rmoriebricklayer::llmstat(),
+#'                    status %in% c("key set", "configured")))) {
+#'     cat(mdask("hello"))
+#'   }
+#'   for (v in names(old)) {
+#'     if (is.na(old[[v]])) Sys.unsetenv(v) else do.call(Sys.setenv, as.list(old[v]))
+#'   }
+#' }
 #' @export
-ask <- function(question, model = NULL, backend = "auto") {
+mdask <- function(question, model = NULL, route = NULL) {
   .rmoriedata_scalar(question, "question")
-  .rmoriedata_scalar(backend, "backend")
   if (!is.null(model)) .rmoriedata_scalar(model, "model")
-  bin <- Sys.which("rmorie")
-  if (!nzchar(bin)) {
-    return("rmorie CLI not found on PATH. Install rmorie-cli to use ask().")
-  }
-  preamble <- paste0(
-    "You are helping explore the datasets bundled in the MORIE packages ",
-    "(rmoriedata). Prefer the bundled catalog. Question: ", question
+  if (!is.null(route)) .rmoriedata_scalar(route, "route")
+  # the catalogue itself, so the model can name tables rather than guess
+  cat_tbl <- tryCatch(mdcat(), error = function(e) NULL)
+  rows <- if (is.null(cat_tbl)) character() else
+    ifelse(is.na(cat_tbl$n_rows), "-",
+           format(cat_tbl$n_rows, big.mark = ",", trim = TRUE))
+  listing <- if (is.null(cat_tbl) || !nrow(cat_tbl)) "" else paste0(
+    " The bundled catalogue (slug: kind, rows): ",
+    paste(sprintf("%s: %s, %s", cat_tbl$slug, cat_tbl$kind, rows), collapse = "; "),
+    ". Load one with mdload(\"<slug>\"); hostcat() ",
+    "lists the tables at data.rmorie.com (they need the data key: ",
+    "hostlogin()).")
+  system_prompt <- paste0(
+    "You are helping explore the datasets bundled in rmoriedata. Name the tables ",
+    "from the catalogue that answer the question, and only those.",
+    listing
   )
-  # system2() hands `args` to a shell: quote every value, or the first
-  # parenthesis in the request is a shell syntax error (and a ";" in the
-  # question would run as a command).
-  args <- c("agent", "--backend", shQuote(backend))
-  if (!is.null(model)) args <- c(args, "-m", shQuote(model))
-  args <- c(args, shQuote(preamble))
-  paste(suppressWarnings(
-    system2(bin, args = args, stdout = TRUE, stderr = TRUE)
-  ), collapse = "\n")
+  f <- .rmd_bl("llmask")
+  args <- list(question, model = model, syspro = system_prompt)
+  have <- names(formals(f))
+  if ("route" %in% have) args$route <- route
+  if ("docs" %in% have) {
+    # rmoriebricklayer 0.5.12 and later: the model reads both packages' help
+    args$docs <- TRUE
+    args$pkgs <- c("rmoriedata", "rmoriebricklayer")
+  }
+  tryCatch(
+    do.call(f, args),
+    # a refused key, a model the route does not have or no network reads as a
+    # sentence, never as an error: an example or a script keeps going
+    error = function(e) {
+      paste0("The language model could not answer: ", conditionMessage(e))
+    }
+  )
 }
 
 # A non-NA, non-blank character scalar, or an error naming the argument.
@@ -60,4 +90,42 @@ ask <- function(question, model = NULL, backend = "auto") {
          call. = FALSE)
   }
   invisible(TRUE)
+}
+
+#' Show or save the language-model settings
+#'
+#' The route \code{\link{mdask}()} takes and the address, key and model of each
+#' route (your own OpenAI-compatible server, each provider such as Anthropic or
+#' OpenAI, a local or LAN Ollama server), shared with \pkg{rmoriebricklayer},
+#' \pkg{rmorie} and
+#' the Python package morie. A thin front to
+#' \code{rmoriebricklayer::llmcfg()}, which saves them in
+#' \code{~/.config/morie/llm.json} only when you pass a setting; from the
+#' shell, \code{rmbl config} and \code{rmbl config setup} do the same.
+#'
+#' @param ... Settings as \code{key = value}, e.g. \code{route = "anthropic"},
+#'   \code{anthropic.key = "..."}, \code{anthropic.model = "claude-opus-5-5"},
+#'   \code{ollama.url = "http://192.168.1.20:11434"},
+#'   \code{own.url = "http://localhost:1234/v1"}; \code{NULL} removes one.
+#'   With no arguments nothing is written.
+#' @return A data frame with one row per setting (\code{key}, \code{value},
+#'   \code{source}, \code{env}, \code{help}).
+#' @examples
+#' if ("llmcfg" %in% getNamespaceExports("rmoriebricklayer")) {
+#'   mdllmconf()   # reading writes nothing
+#' }
+#' \dontrun{
+#' mdllmconf(route = "anthropic", anthropic.model = "claude-opus-5-5")
+#' mdllmconf(route = NULL)   # back to the automatic order
+#' }
+#' @export
+mdllmconf <- function(...) {
+  if (!"llmcfg" %in% getNamespaceExports("rmoriebricklayer")) {
+    stop("saving language-model settings needs rmoriebricklayer 0.5.11 or later: ",
+         "install.packages(\"rmoriebricklayer\", repos = ",
+         "c(\"https://rootcoder007.r-universe.dev\", \"https://cloud.r-project.org\"))",
+         call. = FALSE)
+  }
+  f <- getExportedValue("rmoriebricklayer", "llmcfg")
+  f(...)
 }

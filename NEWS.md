@@ -1,3 +1,181 @@
+# rmoriedata 0.4.0
+
+* Short names, without underscores, for every exported function and argument, matching
+  rmoriebricklayer 1.0.0: `morie_data_load()` is `mdload()`, `morie_dp_laplace_count()` is
+  `dplapcnt()`, `load_chicago_data()` is `chiload()`, `quasi_identifiers` is `qids`, and so on.
+  Each help page gives the full form of its short name. The old names are not kept.
+* Works with rmoriebricklayer 0.5.1 or later and calls its 1.0.0 names when they are there.
+  Signing in (`hostlogin()`), `mdask()` and the downloads that carry the data key need
+  rmoriebricklayer 1.0.0; with an older one they say so, and attaching rmoriedata prints a
+  one-line note on how to update.
+* The citation gives the CRAN DOI and the r-universe page, and the author's given names in
+  full ("Ruhela VS").
+
+# rmoriedata 0.3.7
+
+* Needs rmoriebricklayer 0.5.14: a new data key from `morie_data_hosted_login()` needs the data
+  access terms accepted first, then your name, organisation and why you need the data (and, for the
+  restricted tables, a supervisor, department chair, director or coordinator). Pass them as
+  arguments (`accept_terms = TRUE`, `name = `, `purpose = `, ...) or answer at the console.
+
+# rmoriedata 0.3.6
+
+* Needs rmoriebricklayer 0.5.13, whose download bar now redraws in the RStudio, Positron and
+  R.app consoles and stays a plain line in knitr and Jupyter.
+* Needs rmoriebricklayer 0.5.12, whose language-model layer `ask()` is built on (0.5.9 was
+  accepted, so a build against an older one ran `ask()` on the retired hosted tier).
+* `ask()` uses a language model you bring (a provider's key, Ollama, or your own server) through
+  rmoriebricklayer, and the model is given rmoriedata's and rmoriebricklayer's help with tools to
+  read it. Its `backend` argument is now `route` (`"auto"`, `"own"`, `"ollama"` or a provider id
+  such as `"anthropic"`); the hosted MORIE tier and the `rmorie` command-line fallback are gone.
+* `morie_data_hosted_load()` uses a downloaded table only when it matches the SHA-256 the
+  manifest lists (fetching the manifest again once before calling a file bad); a mismatch
+  deletes the copy and says so. A restricted table (the ICPSR studies, NCVS 38604, the a2aj
+  case law) refused with 403 says to accept the terms at https://data.rmorie.com/terms.
+* `morie_data_llm_config()` shows and saves the language-model settings (route, and the
+  address, key and model of each route), shared with rmoriebricklayer, rmorie and morie.
+
+# rmoriedata 0.3.5
+
+* A hex logo (`man/figures/logo.png`, source `data-raw/hex_logo.svg`), on the README and the
+  package website, with its favicons; the website indexes `morie_dp_budget()` and `morie_dp_spent()`.
+* **A garbled download is refused, not padded.** The full Chicago export and the tables from
+  data.rmorie.com are read with `fill = FALSE`: a row with a field missing or one too many was
+  padded into the result (and, for Chicago, written to the cross-session cache); it is now an
+  error, and a damaged hosted table's local copy is removed so the next call fetches it again.
+  The Chicago tests also pin the 1% row-count tolerance at its edge (495 of 500 accepted, 494
+  refused) and the request size (the service's count, at least 5,000,000 rows).
+* **Privacy verifiers (review of 0.3.5).** `morie_k_anonymity_verify()` treats a missing
+  quasi-identifier as a level of its own: `stats::aggregate()` had dropped every row with an `NA`
+  key, so a class of one person could pass `k = 3`; class sizes now always sum to `nrow(data)`.
+  `morie_l_diversity_verify()` counts only known sensitive values (`"HIV", NA, NA` is diversity 1,
+  not 2). `morie_cell_suppress()` adds complementary suppressions to a fixed point and then audits
+  the result exactly: a hidden cell the row and column totals determine (its indicator in the row
+  space of the margin constraints) gets another complement, and the result carries
+  `recoverable_mask`, `n_recoverable` and a `protected` verdict to test before publishing. The
+  0.3.5 passes left a lone hidden cell in a row or column, from which the primary value followed
+  by two subtractions; zero cells are no longer used as complements. Checked against brute-force
+  enumeration of every margin-consistent fill on 464 random tables: no disagreement.
+* **Differential privacy.** Noise comes from the operating system's CSPRNG
+  (`rmoriebricklayer::random_bytes()`), not R's seeded generator, so `set.seed()` no longer
+  reproduces a release. Counts and histograms use the exact discrete Laplace sampler of Canonne,
+  Kamath and Steinke (2020) in integer arithmetic (whole-number releases; no floating-point
+  artefact of the kind Mironov (2012) showed in the textbook Laplace sampler). The mean uses the
+  analytic Gaussian mechanism of Balle and Wang (2018), valid for every epsilon; the classical
+  bound, valid only for epsilon <= 1, is gone. All three mechanisms use one neighbouring relation
+  (add or remove one record): the mean is a noised sum over a noised count. New
+  `morie_dp_budget()` / `morie_dp_spent()` charge releases against a budget (basic composition)
+  and refuse one that would exceed it. Examples no longer call `set.seed()`.
+* **Parquet reader.** Every byte access is bounds-checked (an out-of-range raw index had silently
+  read zeros); varints, lists, maps and nesting are capped by the bytes that remain, so the 21-byte
+  file that looped forever is refused at once; the decoded row count must equal the row group's
+  and the footer's exactly (no padding with `NA`, no truncation); a column chunk's type must match
+  the schema's; PLAIN values must fill their page exactly; dictionary indices are range-checked;
+  page sizes and footer row counts are capped (`options(rmoriedata.parquet_max_page_bytes,
+  rmoriedata.parquet_max_rows)`); `PageHeader.crc` is verified when present and the writer now
+  writes it. `tests/testthat/test-parquet-hostile.R` fuzzes all three codecs.
+* **Downloads.** `.rmd_dl()`, which carries the MORIE key as a bearer header, goes through
+  `rmoriebricklayer::bricklayer_download()` (https to public hosts only, no `file://`, size cap)
+  instead of base `url()`; requires rmoriebricklayer 0.5.9. `load_cihi_data_tables()` checks the
+  catalogue against the signed manifest before reading it. `morie_data_verify()` reports files
+  added to the store (`listed = FALSE`), and `morie_data_checksums()` compares each digest with the
+  manifest (`in_manifest`).
+* **Workflows.** The SIU manifest refresh runs only on demand and uploads an artifact instead of
+  committing: the manifest is covered by the XMSS-signed `_checksums.csv`, whose key never leaves
+  the maintainer's machine, so it is re-signed locally with `data-raw/sign_store.R`. A new
+  ASAN/UBSAN job builds the C and runs the suite, including `test-codec-hostile.R`.
+* **Packaging.** `utils` is declared in `Imports`; the stale `RoxygenNote` is dropped
+  (`Config/roxygen2/version` is the roxygen 8 field); `NOTICE` moves to `inst/NOTICE` so it
+  installs, and its data attribution now names the publishers instead of per-file headers that did
+  not exist. The licence text itself stays out of the tarball, as CRAN asks for a standard licence.
+  DESCRIPTION describes the disclosure-control helpers by what they do.
+
+* The curated-data service address comes from the signed services document at
+  rmorie.com (through `rmoriebricklayer::bricklayer_services()` when the installed
+  bricklayer has it; an older bricklayer keeps the default address), so the endpoint can
+  move or be paused without a release. Keys are personal and issued on request at
+  `www.rmorie.com/access/`; every hint says so, and `morie_data_hosted_login(token = )`
+  stores one (the GitHub and emailed-code sign-ins keep working).
+* `ask()` follows `rmoriebricklayer::bricklayer_llm_ask()`'s route order: an endpoint of
+  your own, a local Ollama server, then the hosted MORIE tier as a last resort;
+  `backend = "hosted"` insists on the hosted tier. The setup hint when nothing answers
+  names all three.
+
+# rmoriedata 0.3.4
+
+* The Parquet store is compressed: the writer's Snappy stream was literal-only (valid, but it
+  compressed nothing), so every table's Parquet copy was as large as its raw pages. Pages are now
+  written with GZIP (zlib, level 9) by default, and Snappy, still available, has a real
+  match-finder; both codecs and the reader are C (`src/gzip.c`, `src/snappy.c`). The Parquet copies
+  shrink from 16.1 MB to 3.3 MB (the SIU corpus from 10.0 MB to 2.1 MB) and the installed package
+  from about 27 MB to 14.5 MB; pandas/pyarrow read them as before.
+* SIU corpus: `narrative_summary` holds each report's own account of the incident on 4,605 of 4,613
+  reports (it was empty but for three values that described the SIU's investigation). The text is
+  the opening of the report's "Incident Narrative" / "Description de l'incident" section, or of the
+  "Notification of the SIU" / "Avis à l'UES" section in reports that have no narrative section (2005-2016
+  and re-opened files), about 900 characters cut at a sentence end. It was read from the SIU's pages,
+  re-crawled on 2026-10-05 at one request every 3 seconds; `data-raw/add_siu_narratives.R` rebuilds it.
+* SIU corpus, round 8 (4,613 rows; every change is a row of `data-raw/siu_round8_review.csv`, with
+  the reason read from the page, or a rule of `data-raw/siu_round8_rules.R`):
+  - six French reports of 2005-2011 filed under /en/ are labelled French and carry the service their
+    page names; three of them held "Guelph Police Service", which the pages never name (05-TCD-004
+    is Toronto, 10-PFD-078 the OPP, 10-OOD-009 Ottawa);
+  - a corrigendum is applied to the report it corrects, in a new column `corrigenda`, not counted as
+    a report (drids 385, 620/621 and 5065 correct 328, 521/522 and 4561); six second copies of one
+    report (identical page text) are removed;
+  - case numbers the page body gives: drids 925/926 are 19-TCI-073a, and drid 2209 is the French
+    report of 22-PCI-191 (the OPP in Quinte West), not of 21-OCI-191 as the SIU page's header says;
+  - a French report carries its English report's reviewed case facts (dates, team, counts, the
+    affected person's age and sex, the charges, the director's view): they were empty on about
+    2,240 of 2,304 French rows; the French text fields stay French;
+  - `charges_recommended` is `"FALSE"`, `"TRUE"` or empty (it had 39 spellings), and logical in the
+    typed table (`morie_data_load("siu_directors_reports")`, CSV and Parquet), as `panel_reviewed` is;
+    `sex_gender_affected` is `male` or `female`; one name for Kawartha Lakes and for Cornwall (the
+    Cornwall Community Police Service is now the Cornwall Police Service);
+  - `narrative_summary` held the SIU's mandate paragraph or the page title, not a narrative, and is
+    empty except on the three rows that held report text; `supplemental_materials` lists the
+    legislation and case law a report cites (it held the page's share and privacy links).
+* `ask()` sends the bundled catalogue (slug, kind, rows) with the question, so the model names tables
+  (it was told only to "prefer the bundled catalog", which it could not see). Through the rmorie binary it
+  calls `rmorie agent [--model NAME] QUESTION`, the agent's own options: it passed `--backend`, which
+  the agent refuses, and `-m` for the model; `backend` is `"auto"`, `"hosted"` or `"cli"`. The examples that need a stored key or the binary are `\dontrun`; the one that runs
+  switches the hosted tier off (`MORIE_HOSTED_BASE_URL = "off"`), so it reaches no network
+  whatever key the machine holds.
+* `morie_dp_laplace_count()` and `morie_dp_laplace_histogram()` refuse `Inf` in words (they warned
+  about integer coercion, then failed in R's internals) and refuse counts above 2^53: a double that
+  large has no room for Laplace noise of scale 1/epsilon, so `morie_dp_laplace_count(1e300, 1)`
+  returned exactly 1e300, a "private" release equal to the true count. A whole count beyond R's
+  integer range but below 2^53 is still a count. `morie_core_mean()` refuses text instead of
+  averaging `NA`.
+* Help: `?rmoriedata` describes the package's functions (it said there were none); `?load_siu_reports`
+  lost "% of them" to an Rd escape; "more than 160" databases at data.rmorie.com; a garbled sentence
+  in `?load_chicago_data`; the README's Chicago example is bounded (`limit = 200`).
+* The SIU director's-report corpus: `police_service` is the service of the subject officials
+  on every row (it was the notifying force on many French rows, and on 24 English rows a
+  custody, requesting or neighbouring service -- each corrected after reading the report);
+  one spelling per service; 59 English reports published since the last build, reviewed by
+  the same model panel, and their 60 French reports added; 54 French reports filed under
+  /en/ relabelled; 29 rows that held no director's report removed.
+
+* `ask()` answers through the hosted MORIE tier with the key
+  `morie_data_hosted_login()` stores (ollama.com cloud models and additional AI
+  models such as `kimi-k2.6:cf` or `gpt-oss-120b:cf`), and only falls back to the
+  optional `rmorie` command-line agent when no key is stored.
+
+* Hosted tables download with a live progress bar (percent, size, rate) in
+  an interactive session; `options(morie.quiet = TRUE)` silences it.
+
+* Requires rmoriebricklayer 0.5.2 or newer (the login flow).
+* `morie_data_hosted_login()` signs in to the hosted MORIE tier (GitHub device
+  flow, email code, or a key you hold) and stores the key in the credentials
+  file every MORIE package reads, so rmoriedata alone is enough to use
+  data.rmorie.com.
+* `morie_data_hosted_catalog()` and `morie_data_hosted_load("db/table")`: the
+  160 databases the MORIE project materialises from BigQuery public datasets,
+  served from the edge at data.rmorie.com and opened by the MORIE key that
+  rmorie, morie or rmoriebricklayer store. Cached under the package cache
+  directory (`tempdir()` unless `options(rmoriedata.cache_dir = )`).
+
 # rmoriedata 0.3.3
 
 * Nothing is written outside `tempdir()` unless the user asks. The

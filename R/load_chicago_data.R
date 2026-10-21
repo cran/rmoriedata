@@ -8,14 +8,14 @@
 #' cached as Parquet under \code{tempdir()} for the session; to keep it
 #' across sessions name a directory first, for example
 #' \code{options(rmoriedata.cache_dir = tools::R_user_dir("rmoriedata", "cache"))},
-#' and drop it with \code{\link{clear_chicago_cache}()}. Nothing is written
+#' and drop it with \code{\link{chiclr}()}. Nothing is written
 #' outside \code{tempdir()} unless you set that option. The result can be
 #' returned as a base data frame, a
 #' tibble, or written to a Parquet file whose path is returned -- the last being
 #' the recommended bridge for Python (\code{pandas.read_parquet}).
 #'
-#' Parquet I/O uses this package's own native codec (R/aaa_parquet.R); no
-#' package), so no \pkg{arrow} install is required.
+#' Parquet I/O uses this package's own native codec (R/aaa_parquet.R), so
+#' no \pkg{arrow} install is required.
 #'
 #' @param type One of \code{"arrests"} or \code{"complaints"}.
 #' @param as Return format: \code{"data.frame"} (default), \code{"tibble"}, or
@@ -24,13 +24,15 @@
 #' @param full If \code{TRUE}, fetch the complete dataset from Socrata (network,
 #'   large) instead of the bundled sample; a complete fetch is cached as
 #'   Parquet (see Description).
-#' @param limit Optional row cap for a \code{full = TRUE} fetch (passed to
-#'   the Socrata \code{$limit} parameter). A bounded fetch skips the mirror
-#'   and is never written to the full-dataset cache. Default \code{NULL}
+#' @param limit Optional row cap. For a \code{full = TRUE} fetch it is passed to
+#'   the Socrata \code{$limit} parameter (a bounded fetch skips the mirror
+#'   and is never written to the full-dataset cache); otherwise it keeps the
+#'   first \code{limit} rows of the bundled sample. Default \code{NULL}
 #'   fetches everything.
 #' @param fraction Optional share of the dataset, in \code{(0, 1]}, for a
 #'   \code{full = TRUE} fetch: the live row count is looked up and
-#'   \code{limit} is set to \code{ceiling(total * fraction)}. Give either
+#'   \code{limit} is set to \code{ceiling(total * fraction)} (of the bundled
+#'   sample's rows otherwise). Give either
 #'   \code{fraction} or \code{limit}, not both.
 #' @param mirror Optional base URL of an r-universe/drat mirror to try before
 #'   Socrata (offline-friendly fallback). Defaults to
@@ -44,15 +46,15 @@
 #'   path when \code{as = "parquet_path"}.
 #' @examples
 #' # `type` selects the dataset; the bundled sample is returned by default.
-#' comp <- load_chicago_data("complaints") # reported incidents
-#' arr <- load_chicago_data("arrests") # arrests
+#' comp <- chiload("complaints") # reported incidents
+#' arr <- chiload("arrests") # arrests
 #' nrow(comp)
 #' nrow(arr)
 #' head(sort(table(comp$primary_type), decreasing = TRUE), 5)
 #'
 #' # `as = "tibble"` returns a tibble when the package is installed.
 #' if (requireNamespace("tibble", quietly = TRUE)) {
-#'   tb <- load_chicago_data("complaints", as = "tibble")
+#'   tb <- chiload("complaints", as = "tibble")
 #'   class(tb)
 #' }
 #'
@@ -60,7 +62,7 @@
 #' # `as = "parquet_path"` writes a Parquet file and returns its path --
 #' # the recommended bridge to Python (pandas.read_parquet). Offline: the
 #' # bundled sample is written, no network.
-#' pq <- load_chicago_data("arrests", as = "parquet_path")
+#' pq <- chiload("arrests", as = "parquet_path")
 #' file.exists(pq)
 #' }
 #'
@@ -72,11 +74,11 @@
 #' # tries an offline-friendly Parquet mirror first when set.
 #' # `fraction = 0.001` takes a share of the dataset (0.1% of all rows)
 #' # instead of a row count; the live total is looked up first.
-#' big <- try(load_chicago_data("complaints", full = TRUE, limit = 200))
+#' big <- try(chiload("complaints", full = TRUE, limit = 200))
 #' if (!inherits(big, "try-error")) nrow(big)
 #' }
 #' @export
-load_chicago_data <- function(type = c("arrests", "complaints"),
+chiload <- function(type = c("arrests", "complaints"),
                               as = c("data.frame", "tibble", "parquet_path"),
                               full = FALSE,
                               mirror = getOption("rmoriedata.mirror", NULL),
@@ -99,24 +101,24 @@ load_chicago_data <- function(type = c("arrests", "complaints"),
       is.numeric(fraction), length(fraction) == 1L,
       fraction > 0, fraction <= 1
     )
-    total <- .rmd_full_count(type)
-    limit <- max(1L, as.integer(ceiling(total * fraction)))
   }
 
   df <- if (isTRUE(full)) {
+    if (!is.null(fraction)) {
+      limit <- max(1L, as.integer(ceiling(.rmd_full_count(type) * fraction)))
+    }
     .rmd_fetch_full(type, mirror, limit, refresh = isTRUE(refresh))
   } else {
-    .rmd_sample(type)
+    # the bundled sample takes the same row cap (it was ignored without full = TRUE)
+    s <- .rmd_sample(type)
+    if (!is.null(fraction)) limit <- max(1L, as.integer(ceiling(nrow(s) * fraction)))
+    if (!is.null(limit)) s <- s[seq_len(min(nrow(s), as.integer(limit))), , drop = FALSE]
+    s
   }
 
   switch(as,
     "data.frame" = as.data.frame(df, stringsAsFactors = FALSE),
-    "tibble" = {
-      if (!requireNamespace("tibble", quietly = TRUE)) {
-        return(as.data.frame(df, stringsAsFactors = FALSE))
-      }
-      tibble::as_tibble(df)
-    },
+    "tibble" = .rmd_as_tibble(df),
     "parquet_path" = .rmd_write_parquet(df, type, full)
   )
 }
@@ -142,15 +144,15 @@ load_chicago_data <- function(type = c("arrests", "complaints"),
 
 #' Clear the cache of full Chicago datasets
 #'
-#' Deletes the Parquet files that \code{load_chicago_data(full = TRUE)}
+#' Deletes the Parquet files that \code{chiload(full = TRUE)}
 #' wrote to the cache directory: \code{tempdir()} by default, or the
 #' directory named in \code{options(rmoriedata.cache_dir = )}.
 #'
 #' @return The cache directory, invisibly.
 #' @examples
-#' clear_chicago_cache()
+#' chiclr()
 #' @export
-clear_chicago_cache <- function() {
+chiclr <- function() {
   d <- .rmd_cache_dir()
   unlink(list.files(d, full.names = TRUE, all.files = TRUE, no.. = TRUE),
          recursive = TRUE)
@@ -205,17 +207,31 @@ clear_chicago_cache <- function() {
   )
   why <- character()
   for (u in urls) {
+    # the connection's own warning ("Could not connect to server") is the reason this
+    # source failed: it goes into the error below, not out as a stray warning
+    msg <- character()
     df <- tryCatch(
-      if (grepl("\\.parquet$", u)) {
-        morie_read_parquet(u)
-      } else {
-        utils::read.csv(u, stringsAsFactors = FALSE, check.names = TRUE,
-                        encoding = "UTF-8")
-      },
-      error = function(e) NULL
+      withCallingHandlers(
+        if (grepl("\\.parquet$", u)) {
+          morie_read_parquet(u)
+        } else {
+          # fill = FALSE: a row with a field missing or one too many is a garbled
+          # export, an error here rather than a padded row in the cache
+          utils::read.csv(u, stringsAsFactors = FALSE, check.names = TRUE,
+                          encoding = "UTF-8", fill = FALSE)
+        },
+        warning = function(w) {
+          msg <<- c(msg, conditionMessage(w))
+          invokeRestart("muffleWarning")
+        }
+      ),
+      error = function(e) {
+        msg <<- c(msg, conditionMessage(e))
+        NULL
+      }
     )
     if (is.null(df)) {
-      why <- c(why, paste0(u, ": no response"))
+      why <- c(why, paste0(u, ": ", if (length(msg)) msg[[1L]] else "no response"))
       next
     }
     bad <- .rmd_full_reject(df, if (bounded) NA_real_ else expected)
@@ -269,7 +285,7 @@ clear_chicago_cache <- function() {
   tmp2 <- paste0(tmp, ".sha256")
   on.exit(unlink(c(tmp, tmp2)), add = TRUE)
   morie_write_parquet(as.data.frame(df), tmp)
-  writeLines(rmoriebricklayer::sha256_file(tmp), tmp2)
+  writeLines(.rmd_bl("sha256file")(tmp), tmp2)
   # data first, then its digest: a reader between the two renames sees
   # the new file against the old sidecar and refetches (a wasted fetch),
   # never the new digest against the old file
@@ -285,7 +301,7 @@ clear_chicago_cache <- function() {
   side <- paste0(path, ".sha256")
   if (!file.exists(side)) return(NULL)
   want <- readLines(side, n = 1L, warn = FALSE)
-  if (!identical(rmoriebricklayer::sha256_file(path), want)) return(NULL)
+  if (!identical(.rmd_bl("sha256file")(path), want)) return(NULL)
   tryCatch(morie_read_parquet(path), error = function(e) NULL)
 }
 
@@ -300,4 +316,14 @@ clear_chicago_cache <- function() {
   path <- file.path(tempdir(), paste0("rmoriedata_", type, "_", suffix, ".parquet"))
   .rmd_cache_write(df, path)
   path
+}
+
+# a tibble when tibble is installed; otherwise the data.frame, saying so (it was silent)
+.rmd_as_tibble <- function(df) {
+  if (!requireNamespace("tibble", quietly = TRUE)) {
+    message("rmoriedata: the tibble package is not installed, so this is a data.frame ",
+            "(install.packages(\"tibble\") for a tibble)")
+    return(as.data.frame(df, stringsAsFactors = FALSE))
+  }
+  tibble::as_tibble(df)
 }
