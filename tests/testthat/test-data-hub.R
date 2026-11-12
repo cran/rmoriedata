@@ -6,7 +6,9 @@ test_that("hosted catalog and load use the shared MORIE key and cache locally", 
                       MORIE_DATA_URL = "https://data.example.test")
   withr::local_options(rmoriedata.cache_dir = withr::local_tempdir())
   expect_null(.rmd_hosted_key())
-  expect_error(hostcat(), "MORIE key")
+  # no key: nothing is refused locally, the request goes out (to a .test name
+  # that never resolves)
+  expect_error(hostcat(), "data.example.test")
   dir.create(file.path(cfg, "morie"), recursive = TRUE)
   writeLines('{"hosted_key": "sk-good", "hosted_user": "me"}',
              file.path(cfg, "morie", "credentials.json"))
@@ -133,16 +135,44 @@ test_that("a table failing the manifest's SHA-256 is deleted after a refresh", {
                "not listed in the manifest")
 })
 
-test_that("a restricted table refused with 403 says where to accept the terms", {
-  expect_true(rmoriedata:::.rmd_restricted("icpsr_21600/ds0001"))
-  expect_true(rmoriedata:::.rmd_restricted("ncvs_38604/incidents"))
-  expect_false(rmoriedata:::.rmd_restricted("chicago_crime/incidents"))
+test_that("a table refused with 403 names the stored key, not a terms sign-in", {
+  # no table is behind accepted terms any more (the tables open without sign-in,
+  # and ICPSR studies answer 410): a 403 with a key sent means the key was refused
   withr::local_envvar(MORIE_HOSTED_KEY = "sk-x",
                       MORIE_DATA_URL = "https://data.example.test")
   testthat::local_mocked_bindings(.rmd_dl = function(...) stop("answered HTTP 403"),
                                   .package = "rmoriedata")
-  expect_error(rmoriedata:::.rmd_data_get("/icpsr_21600/ds0001.csv.gz", tempfile()),
-               "icpsr_21600/ds0001 is a restricted table.*https://data.rmorie.com/terms")
+  expect_error(rmoriedata:::.rmd_data_get("/a2aj_onca/onca_meta.csv.gz", tempfile()),
+               "rejected the stored key")
   expect_error(rmoriedata:::.rmd_data_get("/chicago_crime/incidents.csv.gz", tempfile()),
                "rejected the stored key")
+  expect_false(exists(".rmd_restricted", asNamespace("rmoriedata"), inherits = FALSE))
+})
+
+test_that("a refused table says why: ICPSR (410), a key asked for, a key rejected", {
+  fail <- "bldl: https://data.example.test/x answered HTTP 410"
+  key <- NULL
+  testthat::local_mocked_bindings(
+    .rmd_data_url = function() "https://data.example.test",
+    .rmd_hosted_key = function() key,
+    .rmd_hosted_size = function(path) NULL,
+    .rmd_dl = function(...) stop(fail, call. = FALSE)
+  )
+  dest <- withr::local_tempfile()
+  expect_error(.rmd_data_get("/icpsr_9/t.csv.gz", dest),
+               "icpsr_9/t is not served by data.rmorie.com: ICPSR's terms")
+  fail <- "bldl: https://data.example.test/x answered HTTP 401"
+  expect_error(.rmd_data_get("/fec/t.csv.gz", dest),
+               "data.rmorie.com asked for a key for fec/t")
+  key <- "sk-x"
+  expect_error(.rmd_data_get("/fec/t.csv.gz", dest), "rejected the stored key")
+  fail <- NULL
+  key <- NULL
+  st <- new.env()
+  testthat::local_mocked_bindings(.rmd_dl = function(url, dest, headers = NULL, ...) {
+    st$hdrs <- headers
+    invisible(dest)
+  })
+  expect_identical(.rmd_data_get("/fec/t.csv.gz", dest), dest)
+  expect_false("Authorization" %in% names(st$hdrs))
 })

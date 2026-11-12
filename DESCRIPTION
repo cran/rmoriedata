@@ -1,7 +1,7 @@
 Package: rmoriedata
 Type: Package
 Title: Integrated Datasets for the 'rmorie' Package
-Version: 0.4.1
+Version: 0.4.2
 Authors@R: c(
   person(
     given = c("Vansh", "Singh"),
@@ -31,7 +31,7 @@ License: AGPL (>= 3)
 Encoding: UTF-8
 Language: en-GB
 Depends: R (>= 4.3.0)
-Imports: stats, utils, rmoriebricklayer (>= 0.5.1)
+Imports: stats, utils, rmoriebricklayer (>= 1.1.0)
 LinkingTo: rmoriebricklayer
 Suggests: withr, testthat (>= 3.0.0), nanoparquet, tibble, curl,
         jsonlite, knitr, rmarkdown
@@ -45,9 +45,9 @@ BugReports: https://github.com/rootcoder007/rmoriedata/issues
 biocViews: Software, ExperimentData
 Config/roxygen2/version: 8.0.0
 NeedsCompilation: yes
-Packaged: 2026-10-23 04:06:31 UTC; rootcoder
+Packaged: 2026-11-11 23:51:28 UTC; rootcoder
 Author: Vansh Singh Ruhela [aut, cre] (ORCID:
     <https://orcid.org/0009-0004-1750-3592>)
 Maintainer: Vansh Singh Ruhela <vsruhela@proton.me>
 Repository: CRAN
-Date/Publication: 2026-10-23 09:10:09 UTC
+Date/Publication: 2026-11-12 04:00:02 UTC

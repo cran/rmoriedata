@@ -1,5 +1,6 @@
-# Curated datasets at data.rmorie.com, opened by the MORIE key that rmorie,
-# morie or rmoriebricklayer store in $XDG_CONFIG_HOME/morie/credentials.json.
+# Curated datasets at data.rmorie.com, with no sign-in; a MORIE key that rmorie,
+# morie or rmoriebricklayer stored earlier in $XDG_CONFIG_HOME/morie/credentials.json
+# is still sent.
 # The same tables the other packages pull; a manifest lists every table with
 # its rows, columns, SHA-256 and the BigQuery public dataset it was built from.
 
@@ -32,12 +33,6 @@
            error = function(e) NULL)
 }
 
-.rmd_access_hint <- function() {
-  svc <- .rmd_services_data()
-  sprintf("keys are personal: sign in with GitHub or an emailed code, or ask at %s",
-          svc$request_access %||% "https://www.rmorie.com/access/")
-}
-
 .rmd_data_url <- function() {
   env <- sub("/+$", "", trimws(Sys.getenv("MORIE_DATA_URL", unset = "")))
   if (nzchar(env)) return(env)
@@ -68,11 +63,6 @@
   for (d in m$datasets) if (identical(d$key, key)) return(d$bytes_gz)
   NULL
 }
-
-# The tables whose source licence asks more than attribution (ICPSR studies, the NCVS
-# 38604 extract, the a2aj case law): data.rmorie.com opens them once the terms are
-# accepted.
-.rmd_restricted <- function(key) grepl("^(icpsr_|ncvs_38604|a2aj_)", key)
 
 # The SHA-256 the manifest lists for a table (NA when it lists none, NULL when the table
 # is not listed); `refresh` fetches the manifest again first.
@@ -119,37 +109,101 @@
 }
 
 .rmd_data_get <- function(path, dest, timeout = 600) {
+  # the open tables need no key; a stored one is still sent
   key <- .rmd_hosted_key()
-  if (is.null(key)) {
-    stop("the curated tables need your MORIE key: run ",
-         "hostlogin(token = ) once (or `rmorie login --token`); ",
-         .rmd_access_hint(), ".",
-         call. = FALSE)
-  }
   old <- options(timeout = max(getOption("timeout", 60), timeout))
   on.exit(options(old), add = TRUE)
-  hdr <- c(Authorization = paste("Bearer", key),
+  hdr <- c(if (!is.null(key)) c(Authorization = paste("Bearer", key)),
            "User-Agent" = "rmoriedata/1 (+https://rmorie.com)")
+  label <- sub("\\.csv\\.gz$", "", sub("^/", "", path))
+  size <- .rmd_hosted_size(path)
+  part <- .rmd_part_bytes()
+  if (!is.null(size) && is.finite(size) && size > 2 * part) {
+    return(.rmd_get_parts(path, dest, hdr, label, size, part, timeout))
+  }
   rc <- tryCatch(
     .rmd_dl(paste0(.rmd_data_url(), path), dest, headers = hdr, timeout = timeout,
-            label = sub("\\.csv\\.gz$", "", sub("^/", "", path)),
-            size = .rmd_hosted_size(path)),
+            label = label, size = size),
     error = function(e) e, warning = function(w) w
   )
-  if (inherits(rc, "condition")) {
-    msg <- conditionMessage(rc)
-    label <- sub("\\.csv\\.gz$", "", sub("^/", "", path))
-    if (grepl("403|Forbidden", msg) && .rmd_restricted(label)) {
-      stop(label, " is a restricted table (its source asks more than a citation): ",
-           "read and accept the terms at https://data.rmorie.com/terms, signed in ",
-           "with your key, then ask again.", call. = FALSE)
-    }
-    if (grepl("401|403|Unauthorized|Forbidden", msg)) {
-      stop("the curated-data service rejected the stored key; store a valid one with ",
-           "hostlogin(token = ) or sign in again.", call. = FALSE)
-    }
-    stop("data.rmorie.com: ", msg, call. = FALSE)
+  if (inherits(rc, "condition")) .rmd_data_failed(rc, label, is.null(key))
+  invisible(dest)
+}
+
+# Says why a download from data.rmorie.com failed.
+.rmd_data_failed <- function(rc, label, keyless) {
+  msg <- conditionMessage(rc)
+  if (grepl("\\b410\\b|Gone", msg)) {
+    stop(label, " is not served by data.rmorie.com: ICPSR's terms do not allow ",
+         "redistribution; download it from ICPSR (https://www.icpsr.umich.edu)",
+         call. = FALSE)
   }
+  if (grepl("401|403|Unauthorized|Forbidden", msg) && keyless) {
+    stop("data.rmorie.com asked for a key for ", label, ": run ",
+         "hostlogin(token = ) once, or update the package.", call. = FALSE)
+  }
+  if (grepl("401|403|Unauthorized|Forbidden", msg)) {
+    stop("the curated-data service rejected the stored key; store a valid one with ",
+         "hostlogin(token = ) or sign in again.", call. = FALSE)
+  }
+  stop("data.rmorie.com: ", msg, call. = FALSE)
+}
+
+# The size of one part of a large download (option rmoriedata.dpart, 90 MB).
+.rmd_part_bytes <- function() {
+  v <- getOption("rmoriedata.dpart", 90 * 2^20)
+  if (!(is.numeric(v) && length(v) == 1L && is.finite(v) && v >= 2^20)) {
+    stop("option rmoriedata.dpart must be a number of bytes, at least 1 MB",
+         call. = FALSE)
+  }
+  v
+}
+
+# Downloads a large table in parts, each a byte range of the file: a broken
+# connection costs at most one part, each part is kept once whole, and a later
+# run resumes from the first part still missing. The caller checks the joined
+# file against the manifest SHA-256.
+.rmd_get_parts <- function(path, dest, hdr, label, size, part, timeout) {
+  starts <- seq(0, size - 1, by = part)
+  n <- length(starts)
+  pdir <- paste0(dest, ".parts")
+  dir.create(pdir, recursive = TRUE, showWarnings = FALSE)
+  pfile <- file.path(pdir, sprintf("%05d", seq_len(n)))
+  for (i in seq_len(n)) {
+    a <- starts[i]
+    want <- min(a + part, size) - a
+    if (file.exists(pfile[i]) && identical(file.size(pfile[i]), want)) next
+    unlink(pfile[i])
+    rc <- tryCatch(
+      .rmd_dl(paste0(.rmd_data_url(), path), pfile[i],
+              headers = c(hdr, Range = sprintf("bytes=%.0f-%.0f", a, a + want - 1)),
+              label = sprintf("%s (part %d of %d)", label, i, n), size = want,
+              timeout = timeout),
+      error = function(e) e, warning = function(w) w
+    )
+    if (inherits(rc, "condition")) {
+      .rmd_data_failed(rc, label, !("Authorization" %in% names(hdr)))
+    }
+    if (!identical(file.size(pfile[i]), want)) {
+      got <- file.size(pfile[i])
+      unlink(pfile[i])
+      stop(sprintf(paste("data.rmorie.com: part %d of %s came back with %.0f bytes,",
+                         "not %.0f; run again to resume from that part"),
+                   i, label, got, want), call. = FALSE)
+    }
+  }
+  out <- file(dest, "wb")
+  for (f in pfile) {
+    con <- file(f, "rb")
+    repeat {
+      buf <- readBin(con, "raw", 2^24)
+      if (!length(buf)) break
+      writeBin(buf, out)
+    }
+    close(con)
+  }
+  close(out)
+  unlink(pdir, recursive = TRUE)
   invisible(dest)
 }
 
@@ -159,9 +213,8 @@
 #' databases materialised from Google BigQuery public datasets (Chicago
 #' crime, EPA air quality, US census, FEC, FDA, NOAA, NHTSA, Hacker News,
 #' Ethereum, World Bank, ...) and serves their tables from the edge. They
-#' open with the MORIE key that rmorie, morie or rmoriebricklayer store
-#' (\code{rmorie login}, \code{rmorie::morie_llm_login()},
-#' \code{rmoriebricklayer::dlogin()}).
+#' need no sign-in; a MORIE key stored earlier by rmorie, morie or
+#' rmoriebricklayer is still sent.
 #' \code{hostcat()} returns every table with its key,
 #' description, rows and BigQuery source (the manifest is kept for a day);
 #' \code{hostload("db/table")} returns one table, cached under
@@ -219,16 +272,16 @@ hostcat <- function(refresh = FALSE) {
 
 #' @rdname hostcat
 #' @param token,email,code,openbro Passed to
-#'   \code{rmoriebricklayer::dlogin()}: a key you already hold
-#'   (keys are personal: sign in with GitHub or an emailed code, or ask at
-#'   \code{www.rmorie.com/access/}), or an email address (a one-time code is
+#'   \code{rmoriebricklayer::dlogin()}: a key you already hold (no
+#'   longer needed for the tables, which open without sign-in), or an email
+#'   address (a one-time code is
 #'   sent; pass it as \code{code} in a non-interactive session). With neither,
 #'   the GitHub device flow runs. The service address comes from the signed
 #'   services document (\code{rmoriebricklayer::svcs()}).
 #' @param ... Passed to \code{rmoriebricklayer::dlogin()}: the
 #'   data access terms and who is asking, which a new key needs
-#'   (\code{accter}, \code{name}, \code{affiliation}, \code{purpose},
-#'   \code{restricted}, \code{supnm}, \code{suprole},
+#'   (\code{accter}, \code{name}, \code{affil}, \code{purp},
+#'   \code{restr}, \code{supnm}, \code{suprole},
 #'   \code{supemail}); what is not given is asked at the console.
 #' @export
 hostlogin <- function(token = NULL, email = NULL, code = NULL,

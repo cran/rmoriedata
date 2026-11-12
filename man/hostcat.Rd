@@ -22,17 +22,17 @@ hostload(key, refresh = FALSE)
 \item{refresh}{Fetch again even when a day-old copy is cached.}
 
 \item{token, email, code, openbro}{Passed to
-\code{rmoriebricklayer::dlogin()}: a key you already hold
-(keys are personal: sign in with GitHub or an emailed code, or ask at
-\code{www.rmorie.com/access/}), or an email address (a one-time code is
+\code{rmoriebricklayer::dlogin()}: a key you already hold (no
+longer needed for the tables, which open without sign-in), or an email
+address (a one-time code is
 sent; pass it as \code{code} in a non-interactive session). With neither,
 the GitHub device flow runs. The service address comes from the signed
 services document (\code{rmoriebricklayer::svcs()}).}
 
 \item{...}{Passed to \code{rmoriebricklayer::dlogin()}: the
 data access terms and who is asking, which a new key needs
-(\code{accter}, \code{name}, \code{affiliation}, \code{purpose},
-\code{restricted}, \code{supnm}, \code{suprole},
+(\code{accter}, \code{name}, \code{affil}, \code{purp},
+\code{restr}, \code{supnm}, \code{suprole},
 \code{supemail}); what is not given is asked at the console.}
 
 \item{key}{A \code{db/table} key from the catalog.}
@@ -49,9 +49,8 @@ Beyond the open data this package ships, the MORIE project keeps more than 160
 databases materialised from Google BigQuery public datasets (Chicago
 crime, EPA air quality, US census, FEC, FDA, NOAA, NHTSA, Hacker News,
 Ethereum, World Bank, ...) and serves their tables from the edge. They
-open with the MORIE key that rmorie, morie or rmoriebricklayer store
-(\code{rmorie login}, \code{rmorie::morie_llm_login()},
-\code{rmoriebricklayer::dlogin()}).
+need no sign-in; a MORIE key stored earlier by rmorie, morie or
+rmoriebricklayer is still sent.
 \code{hostcat()} returns every table with its key,
 description, rows and BigQuery source (the manifest is kept for a day);
 \code{hostload("db/table")} returns one table, cached under
