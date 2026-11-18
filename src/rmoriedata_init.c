@@ -53,6 +53,26 @@ SEXP C_rmd_snappy_decompress(SEXP x);
 SEXP C_rmd_gzip_compress(SEXP x);
 SEXP C_rmd_gzip_decompress(SEXP x, SEXP size);
 SEXP C_rmd_crc32(SEXP x);
+SEXP C_rmd_zstd_decompress(SEXP x, SEXP size);
+SEXP C_rmd_flock_with(SEXP path, SEXP fn, SEXP busy);
+SEXP C_rmd_pq_strings(SEXP buf, SEXP pos, SEXP count, SEXP column);
+SEXP C_rmd_pq_bytes(SEXP x);
+SEXP C_rmd_pq_rle(SEXP buf, SEXP pos, SEXP width, SEXP count, SEXP end);
+SEXP C_rmd_pq_rows(SEXP page, SEXP dpos, SEXP dend, SEXP ipos, SEXP iwidth, SEXP vals,
+                   SEXP n, SEXP column);
+SEXP C_rmd_pq_flba(SEXP buf, SEXP pos, SEXP count, SEXP width, SEXP kind);
+SEXP C_rmd_pq_ints(SEXP buf, SEXP pos, SEXP count, SEXP width, SEXP unsigned_);
+SEXP C_rmd_pq_i64(SEXP x, SEXP per);
+SEXP C_rmd_pq_secs(SEXP buf, SEXP pos, SEXP count, SEXP width, SEXP per);
+SEXP C_rmd_strtod(SEXP x);
+SEXP C_rmd_pq_usfit(SEXP x);
+SEXP C_rmd_readfile(SEXP path, SEXP max);
+SEXP C_rmd_vopen(SEXP path, SEXP verify, SEXP max);
+SEXP C_rmd_vread(SEXP h, SEXP start, SEXP n);
+SEXP C_rmd_vclose(SEXP h);
+SEXP C_rmd_sha256(SEXP x);
+SEXP C_rmd_gunzip(SEXP x);
+SEXP C_rmd_gzip_store(SEXP x);
 
 static const R_CallMethodDef CallEntries[] = {
     {"C_morie_core_sha256", (DL_FUNC) &C_morie_core_sha256, 1},
@@ -61,6 +81,25 @@ static const R_CallMethodDef CallEntries[] = {
     {"C_rmd_gzip_compress",     (DL_FUNC) &C_rmd_gzip_compress,     1},
     {"C_rmd_gzip_decompress",   (DL_FUNC) &C_rmd_gzip_decompress,   2},
     {"C_rmd_crc32",             (DL_FUNC) &C_rmd_crc32,             1},
+    {"C_rmd_zstd_decompress",   (DL_FUNC) &C_rmd_zstd_decompress,   2},
+    {"C_rmd_flock_with",        (DL_FUNC) &C_rmd_flock_with,        3},
+    {"C_rmd_pq_strings",        (DL_FUNC) &C_rmd_pq_strings,        4},
+    {"C_rmd_pq_bytes",          (DL_FUNC) &C_rmd_pq_bytes,          1},
+    {"C_rmd_pq_rle",            (DL_FUNC) &C_rmd_pq_rle,            5},
+    {"C_rmd_pq_rows",           (DL_FUNC) &C_rmd_pq_rows,           8},
+    {"C_rmd_pq_flba",           (DL_FUNC) &C_rmd_pq_flba,           5},
+    {"C_rmd_pq_ints",           (DL_FUNC) &C_rmd_pq_ints,           5},
+    {"C_rmd_pq_i64",            (DL_FUNC) &C_rmd_pq_i64,            2},
+    {"C_rmd_pq_secs",           (DL_FUNC) &C_rmd_pq_secs,           5},
+    {"C_rmd_strtod",            (DL_FUNC) &C_rmd_strtod,            1},
+    {"C_rmd_pq_usfit",          (DL_FUNC) &C_rmd_pq_usfit,          1},
+    {"C_rmd_readfile",          (DL_FUNC) &C_rmd_readfile,          2},
+    {"C_rmd_vopen",             (DL_FUNC) &C_rmd_vopen,             3},
+    {"C_rmd_vread",             (DL_FUNC) &C_rmd_vread,             3},
+    {"C_rmd_vclose",            (DL_FUNC) &C_rmd_vclose,            1},
+    {"C_rmd_sha256",            (DL_FUNC) &C_rmd_sha256,            1},
+    {"C_rmd_gunzip",            (DL_FUNC) &C_rmd_gunzip,            1},
+    {"C_rmd_gzip_store",        (DL_FUNC) &C_rmd_gzip_store,        1},
     {"C_morie_core_mean",   (DL_FUNC) &C_morie_core_mean,   1},
     {NULL, NULL, 0}
 };

@@ -23,6 +23,49 @@ budget add up, and a release that would exceed the budget is refused
 before any noise is drawn. A hundred releases at \code{epsilon = 1} spend
 \code{epsilon = 100}; a budget makes that visible and enforceable.
 }
+\details{
+A budget is an in-memory ledger held by the R process that created it.
+A forked worker (for example under \code{\link[parallel:mclapply]{parallel::mclapply()}} or
+\code{parallel::mcparallel()}) gets its own copy, so its spending would never
+reach the parent and every worker could spend the whole budget again.
+A release charged to a budget from any process other than the one that
+created it is therefore refused with an error. Spend a budget in the
+process that created it; to release from workers, give each worker its
+own budget and account for the total yourself by composition (the
+epsilons and deltas of all workers add up). A budget saved and read
+back in another R session is refused in the same way, even one whose
+process has the same PID (in a container whose entrypoint is \code{Rscript}
+every session is PID 1): each budget carries a random token drawn from
+the operating system's CSPRNG when the package is loaded, and a release
+is charged only in the process, and the load of the package, that made
+the budget.
+
+A copy of a budget made in the same session is refused too: one written
+with \code{\link[=saveRDS]{saveRDS()}} and read back with \code{\link[=readRDS]{readRDS()}}, passed through
+\code{\link[=serialize]{serialize()}} and \code{\link[=unserialize]{unserialize()}}, or rebuilt from its fields. The copy
+is a second ledger that would start from what the budget had spent when
+it was copied, so the two together could spend the budget twice; every
+budget is registered in the package when it is made, and only that
+object can be charged. Assigning a budget to another name (\code{b2 <- b})
+makes no copy: both names are the one ledger. What is not prevented:
+code that sets a budget's fields by hand, or that creates several
+budgets for one dataset. A budget is an accounting aid for honest code,
+not a defence against code that means to overspend.
+
+A budget of \code{delta = 0} pays only for pure-DP releases: a release with
+any \code{delta > 0} is refused. The totals are compared with a slack for
+floating-point rounding only, so that ten releases at \code{epsilon = 0.1}
+fit a budget of 1: the slack is \code{(n + 2)} units in the last place of
+the larger of the budget and the total, \code{n} being the number of
+releases (below a millionth of a millionth of the budget for 4,000
+releases), and a release more than twice what remains is refused
+whatever the slack.
+
+A release is charged before its noise is drawn. If it is interrupted
+or fails after that, the budget stays charged though nothing was
+released: the safe side, since a release that went out uncharged would
+spend privacy the ledger does not show.
+}
 \examples{
 b <- dpbudget(epsilon = 2)
 dplapcnt(42, epsilon = 1, budget = b)

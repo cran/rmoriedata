@@ -31,6 +31,9 @@ A list with class \code{"morie_k_anon"} containing:
 Checks whether a data.frame satisfies k-anonymity over the supplied
 quasi-identifier columns. A dataset is k-anonymous if every combination
 of quasi-identifier values appears in at least \code{k} rows.
+A data frame with no rows is refused: every class of an empty table
+meets any threshold vacuously, which says nothing about a release (it was
+reported as "VIOLATED ... 0/0 classes below threshold").
 }
 \details{
 A missing value (\code{NA}) in a quasi-identifier is treated as a value of
@@ -38,7 +41,21 @@ its own: rows with an unrecorded ward, age band or race form their own
 classes and are counted, never dropped. Unrecorded values are often the
 rarest records, which makes them the most re-identifiable, so they must
 meet the threshold like any other class. Every row is accounted for:
-the class sizes sum to \code{nrow(data)}.
+the class sizes sum to \code{nrow(data)}. \code{NaN} counts as missing, in the
+same class as \code{NA}.
+
+Values are compared exactly. Two numbers are in one class only when
+they are the same number in storage, whatever the column's class
+(plain double, \code{Date}, \code{POSIXct}, \code{difftime}, \code{I()} and other classed
+numbers alike), so \code{0.1 + 0.2} and \code{0.3}, which differ in the last bit,
+are two classes, and so are two times a microsecond apart; \code{-0} and \code{0}
+are one. A complex number is compared by both parts. Integer, logical,
+character and raw columns are compared by value, a factor by its level
+label and a \code{POSIXlt} by the instant it names. A factor level that is
+itself \code{NA} is missing, and the string \code{"NA"} is a value, not a missing
+one. A column that cannot be compared exactly is refused with an error
+naming it: a \code{bit64::integer64} column (convert it with
+\code{as.character()}), a list column and a matrix column.
 }
 \examples{
 df <- data.frame(

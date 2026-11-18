@@ -341,10 +341,10 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 
 
-<p><code>rmoriedata</code> bundles the open-data fixtures used across
-the <code>rmorie</code> ecosystem and ships a small set of
-analyst-facing helpers for releasing aggregate statistics without
-re-identification risk. Everything shown here runs
+<p><code>rmoriedata</code> is a toolkit for disclosure control of
+aggregate releases: differential privacy, k-anonymity and l-diversity
+checks, and cell suppression audited against the margins. It also
+bundles open datasets to use them on. Everything shown here runs
 <strong>offline</strong> against data that installs with the package –
 no network required.</p>
 <p>The package has four surfaces:</p>
@@ -355,7 +355,8 @@ slug.</li>
 Ontario SIU director’s-report corpus, and the CIHI data-table
 catalogue.</li>
 <li><strong>Differential-privacy mechanisms</strong>
-(<code>morie_dp_*</code>).</li>
+(<code>dplapcnt</code>, <code>dplaphist</code>, <code>dpgmean</code>,
+with the budget kept by <code>dpbudget</code>).</li>
 <li><strong>Re-identification-risk verifiers</strong>
 (<code>kanonvrf</code>, <code>ldivvrf</code>,
 <code>cellsupp</code>).</li>
@@ -364,8 +365,9 @@ catalogue.</li>
 <h2>1. Browsing the bundled store</h2>
 <p>Every bundled table ships as a CSV with a bundled column schema,
 listed in a SHA-256 manifest that is signed with the package’s XMSS key
-and verified on load (see ). <code>mdcat()</code> lists what’s there,
-with row/column counts and the original source path.</p>
+and verified on load (see section 3, Data integrity, and
+<code>?mdverify</code>). <code>mdcat()</code> lists what’s there, with
+row/column counts and the original source path.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a>cat <span class="ot">&lt;-</span> <span class="fu">mdcat</span>()</span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">table</span>(cat<span class="sc">$</span>kind)</span>
 <span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="co">#&gt; </span></span>
@@ -477,21 +479,21 @@ and is a network call, so it isn’t run here.)</p>
 <span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a></span>
 <span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a><span class="co"># A private count of records matching a predicate.</span></span>
 <span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a><span class="fu">dplapcnt</span>(<span class="at">truecnt =</span> <span class="dv">42</span>, <span class="at">epsilon =</span> <span class="fl">1.0</span>)</span>
-<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a><span class="co">#&gt; [1] 41</span></span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a><span class="co">#&gt; [1] 43</span></span>
 <span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a></span>
 <span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a><span class="co"># The mechanism is unbiased -- averaging many releases recovers the truth.</span></span>
 <span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a><span class="fu">mean</span>(<span class="fu">replicate</span>(<span class="dv">2000</span>, <span class="fu">dplapcnt</span>(<span class="dv">42</span>, <span class="at">epsilon =</span> <span class="fl">1.0</span>)))</span>
-<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a><span class="co">#&gt; [1] 41.9825</span></span>
+<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a><span class="co">#&gt; [1] 41.967</span></span>
 <span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a></span>
 <span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a><span class="co"># A private mean of bounded data.</span></span>
 <span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a>x <span class="ot">&lt;-</span> <span class="fu">runif</span>(<span class="dv">1000</span>, <span class="dv">0</span>, <span class="dv">1</span>)</span>
 <span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a><span class="fu">dpgmean</span>(x, <span class="at">lower =</span> <span class="dv">0</span>, <span class="at">upper =</span> <span class="dv">1</span>, <span class="at">epsilon =</span> <span class="fl">1.0</span>)</span>
-<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a><span class="co">#&gt; [1] 0.4923508</span></span>
+<span id="cb9-14"><a href="#cb9-14" tabindex="-1"></a><span class="co">#&gt; [1] 0.5020214</span></span>
 <span id="cb9-15"><a href="#cb9-15" tabindex="-1"></a></span>
 <span id="cb9-16"><a href="#cb9-16" tabindex="-1"></a><span class="co"># A private histogram straight from tabulated data.</span></span>
 <span id="cb9-17"><a href="#cb9-17" tabindex="-1"></a>counts <span class="ot">&lt;-</span> <span class="fu">as.integer</span>(<span class="fu">table</span>(comp<span class="sc">$</span>year))</span>
 <span id="cb9-18"><a href="#cb9-18" tabindex="-1"></a><span class="fu">round</span>(<span class="fu">pmax</span>(<span class="dv">0</span>, <span class="fu">dplaphist</span>(counts, <span class="at">epsilon =</span> <span class="fl">1.0</span>)))</span>
-<span id="cb9-19"><a href="#cb9-19" tabindex="-1"></a><span class="co">#&gt; [1] 24999     1</span></span></code></pre></div>
+<span id="cb9-19"><a href="#cb9-19" tabindex="-1"></a><span class="co">#&gt; [1] 24999     2</span></span></code></pre></div>
 </div>
 <div id="re-identification-risk" class="section level2">
 <h2>5. Re-identification risk</h2>

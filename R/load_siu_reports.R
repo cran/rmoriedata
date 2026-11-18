@@ -51,16 +51,16 @@
 #' not stated in the published reports and are empty throughout; they are
 #' kept so the table's shape matches the parser's schema.
 #'
-#' This is the machine-readable companion to the SIU parser and
-#' data-mining subsystem in \pkg{rmorie} / \pkg{morie} -- the first
-#' open-source pipeline for the SIU director's-report corpus, created
-#' by Vansh Singh Ruhela as part of the MORIE / MRM framework. The
-#' table is regenerated from the parser over the full public corpus;
-#' see \code{rmorie::morie_fetch_siu()} to rebuild it live.
+#' The table is the output of the SIU director's-report parser, the first
+#' open-source pipeline for this corpus, created by Vansh Singh Ruhela as
+#' part of the MORIE / MRM framework, regenerated over the full public
+#' corpus. The parser itself is in the rmorie package
+#' (\code{rmorie::morie_fetch_siu()} rebuilds the table live); nothing
+#' here needs it.
 #'
 #' This loader returns the corpus as text: every column is character and
 #' an empty cell is \code{""}, which is the form the SIU parser writes and
-#' \pkg{rmorie} reads back. The same table is also in the typed data
+#' reads back. The same table is also in the typed data
 #' store: \code{mdload("siu_directors_reports")} applies the
 #' bundled schema (integer \code{drid} and counts, \code{NA} for empty
 #' cells), so counts of missing values differ between the two entry
@@ -78,7 +78,7 @@
 #' @source Ontario Special Investigations Unit director's reports,
 #'   \url{https://www.siu.on.ca/en/directors_reports.php} (post-2018)
 #'   and the Ontario Government archive (pre-2018). Parsed with the
-#'   \pkg{rmorie} SIU subsystem.
+#'   MORIE SIU parser.
 #' @examples
 #' # Default: every parsed report, as a base data.frame.
 #' all <- siuload()
@@ -106,12 +106,14 @@
 siuload <- function(lang = c("all", "en", "fr"),
                              as = c("data.frame", "tibble"),
                              format = c("csv", "parquet")) {
-  lang <- match.arg(lang)
-  as <- match.arg(as)
-  format <- match.arg(format)
+  .rmd_bounds()
+  lang <- .rmd_arg(lang, "lang")
+  as <- .rmd_arg(as, "as")
+  format <- .rmd_arg(format, "format")
   rel <- "siu_directors_reports.csv.gz"
-  path <- system.file("extdata", rel, package = "rmoriedata")
-  if (!nzchar(path)) {
+  # the store the signed manifest is checked against, which is the one read
+  path <- file.path(.rmoriedata_extdata(), rel)
+  if (!file.exists(path)) {
     stop("bundled SIU director's-report corpus not found in rmoriedata",
       call. = FALSE
     )
@@ -120,14 +122,15 @@ siuload <- function(lang = c("all", "en", "fr"),
     # the typed table's Parquet copy as text: the corpus ships one Parquet copy, not two
     d <- mdload("siu_directors_reports", format = "parquet")
     d[] <- lapply(d, function(z) {
-      z <- as.character(z)
+      # a number as text the same under any options(scipen = )
+      z <- .rmd_text(z)
       z[is.na(z)] <- ""
       z
     })
     d
   } else {
-    .rmoriedata_check_file(rel)
-    utils::read.csv(gzfile(path),
+    # read once: the bytes checked are the bytes read
+    .rmd_csv_bytes(.rmoriedata_bytes(rel),
       stringsAsFactors = FALSE, encoding = "UTF-8",
       colClasses = "character", check.names = FALSE
     )

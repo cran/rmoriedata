@@ -12,7 +12,13 @@ test_that("the Parquet copy of every table equals the CSV copy", {
     expect_identical(names(b), names(a), label = slug)
     expect_identical(vapply(b, function(z) class(z)[1L], ""),
                      vapply(a, function(z) class(z)[1L], ""), label = slug)
-    expect_equal(b, a, ignore_attr = TRUE, label = slug)
+    # every value identical, bit for bit, whatever the class
+    for (j in names(a)) {
+      x <- unclass(a[[j]])
+      y <- unclass(b[[j]])
+      attributes(x) <- attributes(y) <- NULL
+      expect_true(identical(y, x, num.eq = FALSE), label = paste(slug, j))
+    }
   }
 })
 

@@ -7,7 +7,8 @@
 mdsums()
 }
 \value{
-A data frame with one row per bundled file and columns
+A data frame with one row per bundled file, in the byte order of
+\code{path} (the same in every locale), and columns
 \code{path} (relative to the extdata root, forward slashes, unique),
 \code{file} (the bare basename), \code{bytes}, \code{sha256}, and
 \code{in_manifest} (TRUE when the signed manifest lists the file with
@@ -17,8 +18,9 @@ than one directory.
 }
 \description{
 Computes the SHA256 digest of every file rmoriedata bundles in
-\code{inst/extdata}, using the shared provenance layer
-(\code{rmoriebricklayer::sha256file()}), and compares each with
+\code{inst/extdata}, each file read once and only when it is a regular file
+(\code{NA} for any other path, and for a file larger than 1 GiB), and compares
+each with
 the digest the signed manifest records for it (\code{in_manifest}).
 For the full check, signature included, use \code{\link[=mdverify]{mdverify()}}; this
 function is the per-file record an analysis can pin and compare later.

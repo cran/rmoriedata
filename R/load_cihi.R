@@ -11,9 +11,8 @@
 #' \code{wayback_url} snapshot on the Internet Archive so the table
 #' stays retrievable even if CIHI rotates or removes the live file.
 #'
-#' Pair with \code{rmorie::morie_ingest_cihi_xlsx()} to download + parse
-#' any row (that helper tries \code{url} first and falls back to
-#' \code{wayback_url}). The Wayback snapshots were resolved with
+#' Download any row with \code{\link{cihiget}()}, which tries \code{url}
+#' first and falls back to \code{wayback_url}. The Wayback snapshots were resolved with
 #' \code{rmoriebricklayer::wbsnpurl()}.
 #'
 #' @param archonly If \code{TRUE}, drop rows with no Wayback
@@ -41,21 +40,22 @@
 #' cat$title[grepl("hospital", cat$title, ignore.case = TRUE)][1:3]
 #' @export
 cihitbls <- function(archonly = FALSE) {
+  .rmd_bounds()
   if (!isTRUE(archonly) && !isFALSE(archonly)) {
     stop("`archonly` must be TRUE or FALSE.", call. = FALSE)
   }
-  path <- system.file("extdata", "cihi_data_tables.csv",
-    package = "rmoriedata"
-  )
-  if (!nzchar(path)) {
+  # the store the signed manifest is checked against, which is the one read
+  path <- file.path(.rmoriedata_extdata(), "cihi_data_tables.csv")
+  if (!file.exists(path)) {
     stop("bundled CIHI data-table catalogue not found in rmoriedata",
       call. = FALSE
     )
   }
   # the catalogue's URLs feed downloads: it is checked against the signed manifest
   # like every other bundled file before anything in it is believed
-  .rmoriedata_check_file("cihi_data_tables.csv")
-  df <- utils::read.csv(path, stringsAsFactors = FALSE, check.names = FALSE)
+  # (read once: the bytes checked are the bytes read)
+  df <- .rmd_csv_bytes(.rmoriedata_bytes("cihi_data_tables.csv"),
+                       stringsAsFactors = FALSE, check.names = FALSE, encoding = "UTF-8")
   if (isTRUE(archonly) && "wayback_url" %in% names(df)) {
     df <- df[nzchar(df[["wayback_url"]]), , drop = FALSE]
     rownames(df) <- NULL
@@ -69,15 +69,15 @@ cihitbls <- function(archonly = FALSE) {
 #' \code{dest}, falling back to the Internet Archive snapshot if the live
 #' CIHI URL has rotated or been removed. The download + fallback runs
 #' through \pkg{rmoriebricklayer}'s shared C++/libcurl foundation
-#' (\code{blfetch()}), the same engine \pkg{rmorie} and
-#' \pkg{morie} use -- one implementation across the ecosystem.
+#' (\code{blfetch()}).
 #'
 #' @param which A row index into \code{cihitbls()}, or a
 #'   string matched (case-insensitively, as a substring) against table
 #'   titles. Must resolve to exactly one table.
 #' @param dest Destination file path. Default: a tempfile with the
 #'   table's own extension.
-#' @param timeout Per-request timeout, seconds.
+#' @param timeout Per-request timeout in seconds, from 1 to 86400 (a day); a
+#'   fraction is rounded up to the next whole second.
 #' @return The \code{dest} path, invisibly. Errors if both the live URL
 #'   and its Wayback fallback fail.
 #' @examples
@@ -103,6 +103,7 @@ cihitbls <- function(archonly = FALSE) {
 #' }
 #' @export
 cihiget <- function(which, dest = NULL, timeout = 120L) {
+  .rmd_bounds()
   if (!requireNamespace("rmoriebricklayer", quietly = TRUE)) {
     stop("cihiget() needs 'rmoriebricklayer' for the shared ",
       "fetch-with-fallback engine.",
@@ -110,11 +111,14 @@ cihiget <- function(which, dest = NULL, timeout = 120L) {
     )
   }
   cat_df <- cihitbls()
+  # the transport counts whole seconds from 1: 0.5 reached it as 0 and was refused
+  # under its own argument name
   if (!is.numeric(timeout) || length(timeout) != 1L || !is.finite(timeout) ||
-        timeout <= 0) {
-    stop("`timeout` must be a single positive number of seconds.",
+        timeout < 1 || timeout > 86400) {
+    stop("`timeout` must be a number of seconds from 1 to 86400 (a day).",
          call. = FALSE)
   }
+  timeout <- ceiling(timeout)
   if (is.numeric(which)) {
     if (length(which) != 1L || is.na(which) || which != trunc(which) ||
           which < 1 || which > nrow(cat_df)) {
@@ -125,7 +129,8 @@ cihiget <- function(which, dest = NULL, timeout = 120L) {
     idx <- as.integer(which)
   } else {
     .rmoriedata_scalar(which, "which")
-    hits <- grep(tolower(which), tolower(cat_df$title), fixed = TRUE)
+    # ASCII case only, the same in every locale (in Turkish tolower("I") is not "i")
+    hits <- grep(.rmd_lower(which), .rmd_lower(cat_df$title), fixed = TRUE)
     if (length(hits) == 0L) stop("no CIHI table matches '", which, "'.", call. = FALSE)
     if (length(hits) > 1L) {
       stop("'", which, "' matches ", length(hits), " tables; be more specific:\n  ",
@@ -154,9 +159,13 @@ cihiget <- function(which, dest = NULL, timeout = 120L) {
   invisible(dest)
 }
 
-# The shared fetch-with-fallback engine; one seam for the tests.
+# The shared fetch-with-fallback engine; one seam for the tests. Its errors are
+# told as cihiget()'s, without the engine's own function name.
 .rmd_fetch_file <- function(url, dest, wayback, timeout) {
-  .rmd_bl("blfetch")(url, dest, wayback, timeout)
+  tryCatch(.rmd_bl("blfetch")(url, dest, wayback, timeout), error = function(e) {
+    stop("cihiget() could not download the table: ", .rmd_why(conditionMessage(e)),
+         call. = FALSE)
+  })
 }
 
 # A 200 is not a table: an outage page or an empty body arrives with the
@@ -170,7 +179,7 @@ cihiget <- function(which, dest = NULL, timeout = 120L) {
     stop("the download is empty; the service returned no data.", call. = FALSE)
   }
   magic <- readBin(dest, "raw", 4L)
-  ok <- switch(tolower(format),
+  ok <- switch(.rmd_lower(format),
     xlsx = , zip = identical(magic, as.raw(c(0x50, 0x4b, 0x03, 0x04))),
     xls = identical(magic, as.raw(c(0xd0, 0xcf, 0x11, 0xe0))),
     # a text table: not an HTML page, and more than a header line

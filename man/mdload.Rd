@@ -9,10 +9,12 @@ mdload(slug, refresh = FALSE, format = c("csv", "parquet"))
 \arguments{
 \item{slug}{Dataset slug; see the \code{slug} column of \code{\link[=mdcat]{mdcat()}}.}
 
-\item{refresh}{Re-read the file even if a cached copy exists.}
+\item{refresh}{Re-read the file, and check it against the signed manifest
+again, even if a cached copy exists.}
 
 \item{format}{\code{"csv"} (default) or \code{"parquet"}: which shipped copy to
-read. Both give the same data frame.}
+read. Both give the same data frame, value for value: decimal text in
+the CSV is read as the nearest double, the same on every platform.}
 }
 \value{
 A data frame.
@@ -24,7 +26,10 @@ every platform regardless of how \code{read.csv()} would have guessed.
 Every table also ships as a Parquet file holding the same typed
 frame; \code{format = "parquet"} reads that copy instead. The first load
 of a table is cached for the session; later calls return the cached
-copy unless \code{refresh = TRUE}.
+copy unless \code{refresh = TRUE}. The cached copy is what the file held when
+it was checked; when \code{\link[=mdverify]{mdverify()}} finds the file changed since, the
+cached copy is dropped, and the next load reads the file again and
+refuses it.
 }
 \examples{
 d <- mdload("arsau_2023_uof_main_records")

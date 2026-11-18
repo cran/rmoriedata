@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-#' Shared C-core helpers (rmorie ecosystem backend)
+#' Shared C-core helpers
 #'
 #' Thin access to the compiled core that ships in
 #' \pkg{rmoriebricklayer}. rmoriedata links that core via
 #' `LinkingTo: rmoriebricklayer`, so these functions call the exact same
-#' kernels used across the rmorie family -- no duplicated C code. They
-#' back fast data-integrity hashing and summaries for the bundled
-#' datasets without requiring \pkg{rmorie}.
+#' kernels that package exports -- no duplicated C code. They back fast
+#' data-integrity hashing and summaries for the bundled datasets.
 #'
 #' @param x For `mdsha()`, a length-1 character vector or a
 #'   raw vector. For `mdmean()`, a numeric vector (coerced with
@@ -43,13 +42,21 @@ NULL
 #' @rdname morie_core
 #' @export
 mdsha <- function(x) {
-  if (!is.raw(x)) x <- as.character(x)
+  .rmd_bounds()
+  if (!is.raw(x)) {
+    # one string, hashed as UTF-8 whatever encoding it is marked with
+    if (!is.character(x) || length(x) != 1L || is.na(x)) {
+      stop("`x` must be a raw vector or a single string.", call. = FALSE)
+    }
+    x <- enc2utf8(x)
+  }
   .Call(C_morie_core_sha256, x)
 }
 
 #' @rdname morie_core
 #' @export
 mdmean <- function(x) {
+  .rmd_bounds()
   if (!is.numeric(x) && !is.logical(x)) {
     stop("`x` must be a numeric vector", call. = FALSE)
   }

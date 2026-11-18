@@ -8,8 +8,10 @@ mdverify()
 }
 \value{
 A data frame with one row per manifest entry, then one per
-unlisted file: \code{path}, \code{bytes}, \code{sha256} (the manifest digest, or the
-file's own for an unlisted file), \code{listed}, \code{ok} (the file on disk is
+unlisted file (in the byte order of their paths, the same in every
+locale): \code{path}, \code{bytes}, \code{sha256} (the manifest digest, or the
+file's own for an unlisted file: \code{NA} when it is not a regular file or is
+larger than 1 GiB), \code{listed}, \code{ok} (the file on disk is
 listed and matches). The attribute \code{"signature"} is \code{TRUE} when the
 manifest's signature verified, and the function errors if it did not.
 }
@@ -17,12 +19,30 @@ manifest's signature verified, and the function errors if it did not.
 Every file rmoriedata ships is listed with its SHA-256 in a manifest,
 and the manifest is signed with an XMSS (RFC 8391, SHA-256) key whose
 public half ships with the package. Loading a table checks its file
-against the manifest; this function checks all of them at once.
+against the manifest; this function checks all of them at once. What the
+session has cached from a file found changed or missing (a table loaded
+by \code{\link[=mdload]{mdload()}}, the catalog, the schema) is dropped, so the next load reads
+the file again and refuses it.
 }
 \details{
 A file present in the installed store but absent from the manifest is
-reported too, as a row with \code{listed = FALSE} and \code{ok = FALSE}: a file
-added to the store is as much a change as a file altered in it.
+reported too, hidden (dot) files included, as a row with
+\code{listed = FALSE} and \code{ok = FALSE}: a file added to the store is as much
+a change as a file altered in it.
+
+What is covered: every file under the package's \code{extdata} directory (or
+the directory named by \code{options(rmoriedata.store = )}), which holds
+every table, dictionary, catalog and Parquet copy that \code{\link[=mdload]{mdload()}},
+\code{\link[=mdpath]{mdpath()}}, \code{\link[=mddict]{mddict()}}, \code{\link[=siuload]{siuload()}} and \code{\link[=cihitbls]{cihitbls()}} read. What is not
+covered: the package's R code, its compiled code, and the two lazy-data
+objects \link{complaint_sample} and \link{arrest_sample} (stored in the package's
+\code{data} database, not in \code{extdata}); these are installed files of the
+package itself, which \code{tools::checkMD5sums("rmoriedata")} checks
+against the \code{MD5} file of a CRAN install.
+
+A listed path that holds anything but the file (it is missing, a directory, a
+FIFO, a device, a link that loops or leaves the store, or cannot be read) is
+a row with \code{ok = FALSE}; nothing at such a path is waited on.
 }
 \examples{
 v <- mdverify()

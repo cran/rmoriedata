@@ -6,17 +6,61 @@
 # rarest, so dropping them hides exactly the classes a verifier exists to catch.
 # Returns the class id per row and one row of keys per class (original values, NA
 # kept), in order of first appearance.
+# Classes are built column by column on integer codes (.morie_qi_code()), so no
+# value can collide with a separator: a pasted string key merged ("p", "q\003r")
+# with ("p\003q", "r").
 .morie_qi_classes <- function(qi) {
-  enc <- lapply(qi, function(col) {
-    v <- as.character(col)
-    ifelse(is.na(col), "\001NA", paste0("\002", v))
-  })
-  key <- if (length(enc) == 1L) enc[[1L]] else do.call(paste, c(enc, sep = "\003"))
-  id <- match(key, unique(key))
+  id <- integer(nrow(qi))
+  # by position: a column named "" is not reached by qi[[""]]
+  for (j in seq_along(qi)) {
+    code <- .morie_qi_code(qi[[j]], names(qi)[[j]])
+    code[is.na(code)] <- 0L
+    # two integers written in decimal and joined by "." cannot be read two ways
+    pair <- paste(id, code, sep = ".")
+    id <- match(pair, unique(pair))
+  }
   first <- match(seq_len(max(c(0L, id))), id)
   keys <- qi[first, , drop = FALSE]
   rownames(keys) <- NULL
   list(id = id, keys = keys)
+}
+
+# One column as integer codes, equal codes exactly for equal values and NA for a
+# missing value. Every numeric storage is keyed exactly whatever its class (difftime,
+# POSIXct, I(), ...): unclassed first, a double by its binary value (sprintf("%a")),
+# a complex by both parts, since as.character() keeps 15 significant digits and
+# merged 0.1 + 0.2 with 0.3. -0 is keyed as 0 (they compare equal); NaN is missing
+# like NA. A factor is keyed by its level label, with a level that is itself NA
+# missing (factor(c(NA, "NA"), exclude = NULL) has two levels, NA and "NA"); a
+# POSIXlt by the instant it names. Columns that cannot be keyed exactly are refused
+# by name: integer64 (its bits are not a double's value), list and matrix columns.
+.morie_qi_code <- function(col, name) {
+  if (inherits(col, "integer64")) {
+    stop("column `", name, "` is a bit64 integer64, which cannot be compared ",
+         "exactly here; convert it first (as.character() keeps every digit).",
+         call. = FALSE)
+  }
+  if (!is.null(dim(col)) || (is.list(col) && !inherits(col, "POSIXlt"))) {
+    stop("column `", name, "` is a ",
+         if (is.data.frame(col)) "data frame" else if (is.list(col)) "list" else "matrix",
+         " column; a quasi-identifier or sensitive column must hold one value per row.",
+         call. = FALSE)
+  }
+  if (is.factor(col)) col <- levels(col)[col]
+  if (inherits(col, "POSIXlt")) col <- as.POSIXct(col)
+  col <- unclass(col)
+  attributes(col) <- NULL
+  miss <- is.na(col)
+  v <- switch(typeof(col),
+    double = sprintf("%a", col + 0), # + 0 turns -0 into 0
+    complex = paste(sprintf("%a", Re(col) + 0), sprintf("%a", Im(col) + 0)),
+    logical = , integer = , character = , raw = col,
+    stop("column `", name, "` is of type ", typeof(col), ", which cannot be ",
+         "compared exactly here.", call. = FALSE)
+  )
+  code <- match(v, unique(v))
+  code[miss] <- NA_integer_
+  code
 }
 
 #' k-anonymity verification
@@ -24,13 +68,30 @@
 #' Checks whether a data.frame satisfies k-anonymity over the supplied
 #' quasi-identifier columns. A dataset is k-anonymous if every combination
 #' of quasi-identifier values appears in at least `k` rows.
+#' A data frame with no rows is refused: every class of an empty table
+#' meets any threshold vacuously, which says nothing about a release (it was
+#' reported as "VIOLATED ... 0/0 classes below threshold").
 #'
 #' A missing value (`NA`) in a quasi-identifier is treated as a value of
 #' its own: rows with an unrecorded ward, age band or race form their own
 #' classes and are counted, never dropped. Unrecorded values are often the
 #' rarest records, which makes them the most re-identifiable, so they must
 #' meet the threshold like any other class. Every row is accounted for:
-#' the class sizes sum to `nrow(data)`.
+#' the class sizes sum to `nrow(data)`. `NaN` counts as missing, in the
+#' same class as `NA`.
+#'
+#' Values are compared exactly. Two numbers are in one class only when
+#' they are the same number in storage, whatever the column's class
+#' (plain double, `Date`, `POSIXct`, `difftime`, `I()` and other classed
+#' numbers alike), so `0.1 + 0.2` and `0.3`, which differ in the last bit,
+#' are two classes, and so are two times a microsecond apart; `-0` and `0`
+#' are one. A complex number is compared by both parts. Integer, logical,
+#' character and raw columns are compared by value, a factor by its level
+#' label and a `POSIXlt` by the instant it names. A factor level that is
+#' itself `NA` is missing, and the string `"NA"` is a value, not a missing
+#' one. A column that cannot be compared exactly is refused with an error
+#' naming it: a `bit64::integer64` column (convert it with
+#' `as.character()`), a list column and a matrix column.
 #'
 #' @param data data.frame.
 #' @param qids Character vector of column names.
@@ -73,6 +134,7 @@
 #'   k = 5
 #' )$summary
 kanonvrf <- function(data, qids, k = 5) {
+  .rmd_bounds()
   if (!is.data.frame(data)) {
     stop("`data` must be a data.frame.", call. = FALSE)
   }
@@ -81,20 +143,17 @@ kanonvrf <- function(data, qids, k = 5) {
       call. = FALSE
     )
   }
-  missing_cols <- setdiff(qids, names(data))
-  if (length(missing_cols) > 0L) {
-    stop("Columns not found in `data`: ",
-      paste(missing_cols, collapse = ", "),
-      call. = FALSE
-    )
-  }
+  .rmd_nobytes(qids, "qids")
+  at <- .rmd_cols(data, qids, "qids")
+  k <- .morie_plain(k, "k")
   if (length(k) != 1L || !is.numeric(k) || is.na(k) ||
-    k < 1 || k != as.integer(k)) {
+    k < 1 || k > .Machine$integer.max || k != as.integer(k)) {
     stop("`k` must be a single positive integer.", call. = FALSE)
   }
   k <- as.integer(k)
+  .rmd_rows(data)
 
-  qi <- data[, qids, drop = FALSE]
+  qi <- .rmd_pick(data, at)
   cls <- .morie_qi_classes(qi)
   class_sizes <- cls$keys
   class_sizes$.n <- as.integer(tabulate(cls$id, nbins = nrow(cls$keys)))
@@ -134,12 +193,14 @@ kanonvrf <- function(data, qids, k = 5) {
 #' Checks whether a data.frame satisfies l-diversity: within each
 #' equivalence class defined by the quasi-identifiers, the sensitive
 #' attribute must take at least `l` distinct values.
+#' A data frame with no rows is refused, as by [kanonvrf()].
 #'
 #' Only known (non-`NA`) sensitive values count towards diversity: a class
 #' whose rows read `"HIV"`, `NA`, `NA` tells an adversary the attribute is
 #' HIV or withheld, which is diversity 1. Classes are formed as in
 #' [kanonvrf()], with `NA` in a quasi-identifier as a
-#' level of its own.
+#' level of its own, and sensitive values are compared exactly in the same
+#' way (a factor level that is itself `NA` is withheld, not a value).
 #'
 #' @param data data.frame.
 #' @param qids Character vector of QI column names.
@@ -179,6 +240,7 @@ kanonvrf <- function(data, qids, k = 5) {
 #' # k-anonymity and l-diversity are complementary: check both.
 #' kanonvrf(df, c("age", "sex"), k = 3)$satisfies
 ldivvrf <- function(data, qids, sensitive, l = 3) {
+  .rmd_bounds()
   if (!is.data.frame(data)) {
     stop("`data` must be a data.frame.", call. = FALSE)
   }
@@ -190,29 +252,31 @@ ldivvrf <- function(data, qids, sensitive, l = 3) {
   if (!is.character(sensitive) || length(sensitive) != 1L) {
     stop("`sensitive` must be a single column name.", call. = FALSE)
   }
-  missing_cols <- setdiff(c(qids, sensitive), names(data))
-  if (length(missing_cols) > 0L) {
-    stop("Columns not found in `data`: ",
-      paste(missing_cols, collapse = ", "),
-      call. = FALSE
-    )
-  }
+  .rmd_nobytes(qids, "qids")
+  .rmd_nobytes(sensitive, "sensitive")
+  at <- .rmd_cols(data, qids, "qids")
+  s_at <- .rmd_cols(data, sensitive, "sensitive", reserved = character())
+  l <- .morie_plain(l, "l")
   if (length(l) != 1L || !is.numeric(l) || is.na(l) ||
-    l < 1 || l != as.integer(l)) {
+    l < 1 || l > .Machine$integer.max || l != as.integer(l)) {
     stop("`l` must be a single positive integer.", call. = FALSE)
   }
   l <- as.integer(l)
+  .rmd_rows(data)
 
-  qi <- data[, qids, drop = FALSE]
-  sens <- data[[sensitive]]
+  qi <- .rmd_pick(data, at)
+  sens <- data[[s_at]]
   cls <- .morie_qi_classes(qi)
   diversity_tbl <- cls$keys
   # a missing sensitive value is the absence of a value, not a second one: a class whose
   # only known value is "HIV" has diversity 1 however many rows withhold it
-  known <- !is.na(sens)
-  diversity_tbl$.diversity <- vapply(seq_len(nrow(cls$keys)), function(g) {
-    length(unique(sens[cls$id == g & known]))
-  }, integer(1))
+  # exact codes, as for the quasi-identifiers: match() compares a classed column by
+  # its as.character() form, which merged two times a microsecond apart
+  sc <- .morie_qi_code(sens, sensitive)
+  known <- !is.na(sc)
+  # distinct (class, value) pairs counted once per class: one pass, not a scan per class
+  pair <- unique(data.frame(g = cls$id[known], s = sc[known]))
+  diversity_tbl$.diversity <- tabulate(pair$g, nbins = nrow(cls$keys))
   min_div <- if (nrow(diversity_tbl) == 0L) 0L else min(diversity_tbl$.diversity)
 
   violating <- diversity_tbl[diversity_tbl$.diversity < l, , drop = FALSE]
@@ -244,7 +308,7 @@ ldivvrf <- function(data, qids, sensitive, l = 3) {
 
 #' Cell suppression with complementary suppression and a recoverability audit
 #'
-#' Suppresses (sets to `NA`) every count below `threshold`, then, when
+#' Suppresses (sets to `NA`) every positive count below `threshold`, then, when
 #' `retcomp = TRUE`, hides further cells until no suppressed
 #' value can be solved exactly from the table's row and column totals, which
 #' a published table normally carries.
@@ -269,8 +333,14 @@ ldivvrf <- function(data, qids, sensitive, l = 3) {
 #' non-negativity can narrow; a table whose hidden values must stay inside
 #' a wide interval needs an interval audit (linear programming) on top.
 #'
-#' Only finite numeric cells are eligible for suppression. \code{NA} cells
-#' in the input pass through unchanged and are treated as unpublished.
+#' Cells must be non-negative whole numbers or \code{NA}; infinite,
+#' fractional and negative cells are refused. \code{NA} cells in the input
+#' pass through unchanged and are treated as unpublished: they count as
+#' hidden in the audit (their values are not known to a reader) and receive
+#' complements like any hidden cell, but they are not counted as primary or
+#' complementary suppressions. A zero cell is published as it is: the
+#' threshold rule protects the few contributors of a small cell, and a zero
+#' has none.
 #'
 #' @param tbl A numeric matrix or 2-D table of counts. Will be coerced to
 #'   matrix; row/column names are preserved.
@@ -317,6 +387,8 @@ ldivvrf <- function(data, qids, sensitive, l = 3) {
 #' ))
 #' cellsupp(t2, threshold = 5)$suppressed
 cellsupp <- function(tbl, threshold = 5, retcomp = TRUE) {
+  .rmd_bounds()
+  threshold <- .morie_plain(threshold, "threshold")
   if (length(threshold) != 1L || !is.numeric(threshold) ||
     is.na(threshold) || threshold < 1) {
     stop("`threshold` must be a single positive number.", call. = FALSE)
@@ -326,17 +398,41 @@ cellsupp <- function(tbl, threshold = 5, retcomp = TRUE) {
     stop("`retcomp` must be TRUE or FALSE.", call. = FALSE)
   }
 
-  m <- as.matrix(tbl)
+  # before as.matrix(), which turns a 3-way array or table into one column
+  if (is.null(tbl) || (!is.data.frame(tbl) && length(dim(tbl)) > 2L)) {
+    stop("`tbl` must be 2-dimensional.", call. = FALSE)
+  }
+  # counts as plain numbers: a classed matrix or column (integer64, ...) is refused by
+  # name, and the result carries no class of the input's (.morie_plain())
+  if (is.data.frame(tbl)) {
+    for (j in seq_along(tbl)) {
+      .morie_plain(tbl[[j]], sprintf("tbl[[\"%s\"]]", names(tbl)[j]))
+    }
+  } else {
+    tbl <- .morie_plain(tbl, "tbl", tables = TRUE)
+  }
+  # a function or an environment has no matrix form: as.matrix() errors in base R's words
+  m <- tryCatch(as.matrix(tbl), error = function(e) NULL)
   if (!is.numeric(m)) {
     stop("`tbl` must be a numeric matrix or table.", call. = FALSE)
   }
-  if (length(dim(m)) != 2L) {
-    stop("`tbl` must be 2-dimensional.", call. = FALSE)
+  if (any(m < 0, na.rm = TRUE)) {
+    stop("`tbl` must hold counts: it has a negative cell.", call. = FALSE)
+  }
+  if (any(is.infinite(m))) {
+    stop("`tbl` must hold counts: it has an infinite cell.", call. = FALSE)
+  }
+  if (any(m != floor(m), na.rm = TRUE)) {
+    stop("`tbl` must hold counts: it has a cell that is not a whole number.",
+         call. = FALSE)
   }
 
-  primary <- !is.na(m) & m > 0 & m < threshold
-  hidden <- primary
-  if (retcomp && any(primary)) {
+  # an NA cell is unpublished: hidden from the reader like a suppressed one, so the
+  # audit must not use it as known, and it needs complements like any hidden cell
+  unpub <- is.na(m)
+  primary <- !unpub & m > 0 & m < threshold
+  hidden <- primary | unpub
+  if (retcomp && any(hidden)) {
     budget <- length(m)
     repeat {
       added <- FALSE
@@ -371,7 +467,7 @@ cellsupp <- function(tbl, threshold = 5, retcomp = TRUE) {
       if (budget <= 0L) break
     }
   }
-  complementary <- hidden & !primary
+  complementary <- hidden & !primary & !unpub
   recoverable <- .morie_recoverable(m, hidden)
 
   suppressed <- m
@@ -420,11 +516,63 @@ cellsupp <- function(tbl, threshold = 5, retcomp = TRUE) {
     outer(seq_len(ncol(m)), idx[, 2L], "==") * 1
   )
   A <- A[rowSums(A) > 0, , drop = FALSE]
-  r0 <- qr(A)$rank
-  for (c in seq_len(nh)) {
-    e <- numeric(nh)
-    e[c] <- 1
-    if (qr(rbind(A, e))$rank == r0) out[idx[c, 1L], idx[c, 2L]] <- TRUE
-  }
+  # One factorisation for every hidden cell (it was one qr() per cell): with Q an
+  # orthonormal basis of the row space, e_c lies in it iff its projection keeps
+  # the whole length, sum(Q[c, ]^2) == 1. For a cell off the row space a cycle of
+  # hidden cells through it puts sum(Q[c, ]^2) at most 1 - 1/nh: far from 1e-7.
+  q <- qr(t(A))
+  Q <- qr.Q(q)[, seq_len(q$rank), drop = FALSE]
+  out[idx[rowSums(Q^2) > 1 - 1e-7, , drop = FALSE]] <- TRUE
   out
+}
+
+# The positions in `data` of the columns named `cols` (each once), refused in words
+# where a name is NA, names no column, or names more than one: data[, ""] and
+# data[[""]] stopped in base R's words, and of two columns of one name the first
+# was used without a word. "" is a name like any other (a file can leave a column
+# unnamed). Names in `reserved` (the columns the results add to the classes, which
+# would replace a quasi-identifier of that name) are refused.
+.rmd_cols <- function(data, cols, what, reserved = c(".n", ".diversity")) {
+  if (anyNA(cols)) {
+    stop(sprintf("`%s` holds NA, which names no column.", what), call. = FALSE)
+  }
+  nm <- names(data)
+  missing_cols <- setdiff(cols, nm)
+  if (length(missing_cols) > 0L) {
+    stop("Columns not found in `data`: ",
+      paste(ifelse(nzchar(missing_cols), missing_cols, "\"\""), collapse = ", "),
+      call. = FALSE
+    )
+  }
+  twice <- unique(cols[cols %in% nm[duplicated(nm)]])
+  if (length(twice)) {
+    stop(sprintf(paste0("`data` has more than one column named %s: rename them so ",
+                        "that each name is one column."),
+                 paste0("\"", twice, "\"", collapse = ", ")), call. = FALSE)
+  }
+  added <- intersect(cols, reserved)
+  if (length(added)) {
+    stop(sprintf(paste0("a column named \"%s\" cannot be checked here: the result adds ",
+                        "a column of that name; rename it first."), added[[1L]]),
+         call. = FALSE)
+  }
+  match(unique(cols), nm)
+}
+
+# The columns of `data` at positions `at`, as a plain data frame with their names as
+# they are ("" kept, and a tibble's or data.table's own `[` not involved).
+.rmd_pick <- function(data, at) {
+  out <- lapply(at, function(j) data[[j]])
+  names(out) <- names(data)[at]
+  structure(out, class = "data.frame", row.names = .set_row_names(nrow(data)))
+}
+
+# A table with no rows has no classes: every one of them meets any threshold
+# vacuously, which says nothing about a release, so it is refused in words.
+.rmd_rows <- function(data) {
+  if (!nrow(data)) {
+    stop("`data` has no rows: an empty table meets any threshold vacuously, ",
+         "so there is nothing to check.", call. = FALSE)
+  }
+  invisible(TRUE)
 }

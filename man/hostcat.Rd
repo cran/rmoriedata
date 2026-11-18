@@ -2,60 +2,100 @@
 % Please edit documentation in R/data_hub.R
 \name{hostcat}
 \alias{hostcat}
-\alias{hostlogin}
 \alias{hostload}
 \title{Curated datasets at data.rmorie.com}
 \usage{
 hostcat(refresh = FALSE)
-
-hostlogin(
-  token = NULL,
-  email = NULL,
-  code = NULL,
-  openbro = interactive(),
-  ...
-)
 
 hostload(key, refresh = FALSE)
 }
 \arguments{
 \item{refresh}{Fetch again even when a day-old copy is cached.}
 
-\item{token, email, code, openbro}{Passed to
-\code{rmoriebricklayer::dlogin()}: a key you already hold (no
-longer needed for the tables, which open without sign-in), or an email
-address (a one-time code is
-sent; pass it as \code{code} in a non-interactive session). With neither,
-the GitHub device flow runs. The service address comes from the signed
-services document (\code{rmoriebricklayer::svcs()}).}
-
-\item{...}{Passed to \code{rmoriebricklayer::dlogin()}: the
-data access terms and who is asking, which a new key needs
-(\code{accter}, \code{name}, \code{affil}, \code{purp},
-\code{restr}, \code{supnm}, \code{suprole},
-\code{supemail}); what is not given is asked at the console.}
-
-\item{key}{A \code{db/table} key from the catalog.}
+\item{key}{A \code{db/table} key from the catalog: segments of ASCII
+letters, digits, \code{_}, \code{-} and \code{.}, none starting with a dot,
+joined by single slashes. Any other key is refused before anything is
+requested, and a manifest entry whose key is not of this form is not served.}
 }
 \value{
-\code{hostlogin()}: the key, invisibly, after storing it
-in the shared credentials file.
 \code{hostcat()}: a data frame with \code{key},
-\code{name}, \code{rows} and \code{source};
+\code{name}, \code{rows} (\code{NA} where the manifest gives no whole
+count) and \code{source};
 \code{hostload()}: the table as a data frame.
 }
 \description{
-Beyond the open data this package ships, the MORIE project keeps more than 160
+Beyond the open data this package ships, the MORIE project keeps
 databases materialised from Google BigQuery public datasets (Chicago
 crime, EPA air quality, US census, FEC, FDA, NOAA, NHTSA, Hacker News,
 Ethereum, World Bank, ...) and serves their tables from the edge. They
-need no sign-in; a MORIE key stored earlier by rmorie, morie or
-rmoriebricklayer is still sent.
+need no sign-in and no key; a key that an earlier version of this or a
+related package stored is not read and never sent.
 \code{hostcat()} returns every table with its key,
 description, rows and BigQuery source (the manifest is kept for a day);
+tables whose source terms do not allow redistribution (ICPSR studies,
+among them the NCVS 38604 extract, and any table the manifest marks
+restricted) are not served: they are left out, with a message counting
+them, and \code{hostload()} refuses them before any request. A table is
+served only when its \code{access} mark, if any, is \code{"open"} or
+\code{"public"} and its \code{restricted} mark, if any, is \code{false};
+a mark of any other value or shape counts as restricted.
+\code{hostload()} checks each table against the SHA-256 the manifest
+lists for it (\code{sha256_gz}, \code{sha256} or \code{sha}) and refuses
+a file that does not match; a table listed without any digest is used
+with a warning, once per session.
 \code{hostload("db/table")} returns one table, cached under
 the package cache directory (\code{tempdir()} unless
 \code{options(rmoriedata.cache_dir = )} names a persistent one).
+}
+\details{
+\code{hostload()} returns the table as the file holds it, as the bundled
+tables are read: the column names as written (as the manifest lists
+them); an empty field is missing in a logical or number column and
+\code{""} in a text column (the text \code{"NA"} is a value).
+A column is logical, integer or double only when every value in it is
+written the way R writes such a value: \code{TRUE} or \code{FALSE};
+whole numbers without a leading zero or a plus sign; for double, numbers
+without a leading zero, whole ones of at most 15 digits (which a double
+holds exactly) and decimal ones of at most 17 significant digits (zeros
+after the decimal point are formatting, and \code{"6.0"} is 6), or in R's
+own exponent form (\code{1e-05}). Any other column is text, so a code
+such as \code{"046"} keeps its leading zero, and \code{"+3"},
+\code{".5"}, \code{"0x1A"}, \code{"Inf"} or an identifier of 16 or more
+digits keep every character. A column with no value at all is logical
+\code{NA}.
+Text is marked UTF-8, whatever the session's locale; bytes that are not
+valid UTF-8 are marked \code{"bytes"}, and a NUL byte, which no R string
+holds, is dropped. Quoted fields may hold commas,
+quotes and line breaks (a Windows line end inside a field reads as
+\code{"\\n"}); Windows line ends and a byte-order mark are allowed. A
+record with more or fewer fields than the header is a damaged download:
+the copy is deleted and the call fails, so the next call fetches it again.
+A table's file is its gzip members, each one read: NUL bytes after the
+last member are ignored, as \code{gzip -d} ignores them, and any other
+bytes after it are refused, never read as rows. A cached copy is deleted
+only when it does not match the manifest's digest or is damaged itself;
+a table that cannot be read for another reason (memory that runs short,
+bytes after its gzip data, a session option) stops with the copy left in
+place. Each table is cached in a file of its own under
+\code{hosted/tables} in the cache folder, named from its key so that no
+two keys share one (two that differ only in case included); tables that
+versions before 0.4.3 cached under \code{hosted/} are not read, and are
+fetched again once.
+
+The manifest is fetched again once the cached copy is a day old. When
+that fails (offline, or the service is down) the cached copy is used, with
+a message, so a table already cached in a persistent
+\code{rmoriedata.cache_dir} still loads offline; every table is still
+checked against the digest the manifest lists, and one that does not
+match is not used. With \code{refresh = TRUE} the manifest must be fetched:
+when it cannot be, \code{hostcat()} and \code{hostload()} stop with an
+error instead of using the cached copy.
+
+R sessions loading the same table take turns: while one downloads it, or
+checks its cached copy, the others wait. A session whose wait sees the
+download not grow for \code{options(rmoriedata.lockwait = )} seconds
+(600 by default) stops with an error saying the other session may be
+stalled.
 }
 \examples{
 \dontrun{

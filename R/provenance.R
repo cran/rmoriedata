@@ -3,13 +3,15 @@
 #' SHA256 checksums of bundled rmoriedata files
 #'
 #' Computes the SHA256 digest of every file rmoriedata bundles in
-#' \code{inst/extdata}, using the shared provenance layer
-#' (\code{rmoriebricklayer::sha256file()}), and compares each with
+#' \code{inst/extdata}, each file read once and only when it is a regular file
+#' (\code{NA} for any other path, and for a file larger than 1 GiB), and compares
+#' each with
 #' the digest the signed manifest records for it (\code{in_manifest}).
 #' For the full check, signature included, use [mdverify()]; this
 #' function is the per-file record an analysis can pin and compare later.
 #'
-#' @return A data frame with one row per bundled file and columns
+#' @return A data frame with one row per bundled file, in the byte order of
+#'   \code{path} (the same in every locale), and columns
 #'   \code{path} (relative to the extdata root, forward slashes, unique),
 #'   \code{file} (the bare basename), \code{bytes}, \code{sha256}, and
 #'   \code{in_manifest} (TRUE when the signed manifest lists the file with
@@ -35,7 +37,9 @@
 #' }
 #' @export
 mdsums <- function() {
-  dir <- system.file("extdata", package = "rmoriedata")
+  .rmd_bounds()
+  # the store the manifest is read from (options(rmoriedata.store = ) or the install)
+  dir <- tryCatch(.rmoriedata_extdata(), error = function(e) "")
   empty <- data.frame(
     path = character(), file = character(), bytes = numeric(),
     sha256 = character(), in_manifest = logical(), stringsAsFactors = FALSE
@@ -43,7 +47,10 @@ mdsums <- function() {
   if (!nzchar(dir) || !dir.exists(dir)) {
     return(empty)
   }
-  files <- list.files(dir, full.names = TRUE, recursive = TRUE)
+  # in C (byte) order, the same in every locale: list.files() sorts by the session's
+  # collation, and the record's rows came out in another order under LC_ALL=C
+  files <- sort(list.files(dir, full.names = TRUE, recursive = TRUE, all.files = TRUE,
+                           no.. = TRUE), method = "radix")
   if (length(files) == 0L) {
     return(empty)
   }
@@ -51,7 +58,8 @@ mdsums <- function() {
     path = substring(files, nchar(dir) + 2L),
     file = basename(files),
     bytes = file.size(files),
-    sha256 = vapply(files, .rmd_bl("sha256file"), character(1)),
+    # read once each, a regular file only (a FIFO blocked this): NA otherwise
+    sha256 = vapply(files, .rmd_digest, character(1), max = .rmd_extra_max),
     row.names = NULL,
     stringsAsFactors = FALSE
   )

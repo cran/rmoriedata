@@ -24,9 +24,13 @@
 .morie_dp_bytes <- function(n) {
   buf <- .morie_dp_rng$buf
   pos <- .morie_dp_rng$pos %||% 1L
-  if (is.null(buf) || pos + n - 1L > length(buf)) {
+  # the buffer belongs to the process that drew it: a forked worker (parallel::mclapply)
+  # inherits a copy, and every worker would hand out the same bytes, so the same noise
+  pid <- Sys.getpid()
+  if (is.null(buf) || !identical(.morie_dp_rng$pid, pid) || pos + n - 1L > length(buf)) {
     buf <- .rmd_bl("rndbytes")(max(4096L, n))
     pos <- 1L
+    .morie_dp_rng$pid <- pid
   }
   .morie_dp_rng$buf <- buf
   .morie_dp_rng$pos <- pos + n
@@ -75,6 +79,10 @@
 # epsilon as the rational s / t, rounded DOWN (never more budget than asked for).
 .morie_dp_rational <- function(epsilon) {
   t <- 2^20
+  if (epsilon > t) {
+    stop("`epsilon` is above 2^20, the largest this sampler represents ",
+         "(and no privacy at all).", call. = FALSE)
+  }
   s <- floor(epsilon * t)
   if (s < 1) {
     stop("`epsilon` is below 2^-20, the smallest this sampler represents.",
@@ -92,7 +100,7 @@
   a
 }
 
-# A standard normal from 53-bit CSPRNG uniforms (Box-Muller).
+# A standard normal from 47-bit CSPRNG uniforms (Box-Muller).
 .morie_dp_rnorm1 <- function() {
   u <- function() (.morie_dp_unif_int(2^47) + 0.5) / 2^47
   sqrt(-2 * log(u())) * cos(2 * pi * u())
@@ -128,6 +136,48 @@
 #' before any noise is drawn. A hundred releases at `epsilon = 1` spend
 #' `epsilon = 100`; a budget makes that visible and enforceable.
 #'
+#' A budget is an in-memory ledger held by the R process that created it.
+#' A forked worker (for example under [parallel::mclapply()] or
+#' `parallel::mcparallel()`) gets its own copy, so its spending would never
+#' reach the parent and every worker could spend the whole budget again.
+#' A release charged to a budget from any process other than the one that
+#' created it is therefore refused with an error. Spend a budget in the
+#' process that created it; to release from workers, give each worker its
+#' own budget and account for the total yourself by composition (the
+#' epsilons and deltas of all workers add up). A budget saved and read
+#' back in another R session is refused in the same way, even one whose
+#' process has the same PID (in a container whose entrypoint is `Rscript`
+#' every session is PID 1): each budget carries a random token drawn from
+#' the operating system's CSPRNG when the package is loaded, and a release
+#' is charged only in the process, and the load of the package, that made
+#' the budget.
+#'
+#' A copy of a budget made in the same session is refused too: one written
+#' with [saveRDS()] and read back with [readRDS()], passed through
+#' [serialize()] and [unserialize()], or rebuilt from its fields. The copy
+#' is a second ledger that would start from what the budget had spent when
+#' it was copied, so the two together could spend the budget twice; every
+#' budget is registered in the package when it is made, and only that
+#' object can be charged. Assigning a budget to another name (`b2 <- b`)
+#' makes no copy: both names are the one ledger. What is not prevented:
+#' code that sets a budget's fields by hand, or that creates several
+#' budgets for one dataset. A budget is an accounting aid for honest code,
+#' not a defence against code that means to overspend.
+#'
+#' A budget of `delta = 0` pays only for pure-DP releases: a release with
+#' any `delta > 0` is refused. The totals are compared with a slack for
+#' floating-point rounding only, so that ten releases at `epsilon = 0.1`
+#' fit a budget of 1: the slack is `(n + 2)` units in the last place of
+#' the larger of the budget and the total, `n` being the number of
+#' releases (below a millionth of a millionth of the budget for 4,000
+#' releases), and a release more than twice what remains is refused
+#' whatever the slack.
+#'
+#' A release is charged before its noise is drawn. If it is interrupted
+#' or fails after that, the budget stays charged though nothing was
+#' released: the safe side, since a release that went out uncharged would
+#' spend privacy the ledger does not show.
+#'
 #' @param epsilon Total epsilon available (positive).
 #' @param delta Total delta available (0 for pure DP only).
 #' @return An object of class `"dpbudget"` (an environment, so
@@ -141,7 +191,11 @@
 #' # a second release at epsilon = 1.5 would exceed the remaining 1
 #' try(dplapcnt(42, epsilon = 1.5, budget = b))
 dpbudget <- function(epsilon, delta = 0) {
-  if (length(epsilon) != 1L || !is.numeric(epsilon) || is.na(epsilon) || epsilon <= 0) {
+  .rmd_bounds()
+  epsilon <- .morie_plain(epsilon, "epsilon")
+  delta <- .morie_plain(delta, "delta")
+  if (length(epsilon) != 1L || !is.numeric(epsilon) || !is.finite(epsilon) ||
+      epsilon <= 0) {
     stop("`epsilon` must be a single positive number.", call. = FALSE)
   }
   if (length(delta) != 1L || !is.numeric(delta) || is.na(delta) ||
@@ -154,9 +208,21 @@ dpbudget <- function(epsilon, delta = 0) {
   b$spent_epsilon <- 0
   b$spent_delta <- 0
   b$releases <- 0L
+  b$pid <- Sys.getpid()
+  b$token <- .morie_dp_token()
+  b$id <- paste(as.character(.rmd_bl("rndbytes")(16L)), collapse = "")
   class(b) <- "dpbudget"
+  # ponytail: the registry keeps every budget of the session alive (a few hundred
+  # bytes each); a weak reference would let them go, and R has none at R level
+  assign(b$id, b, envir = .morie_dp_ledgers)
   b
 }
+
+# Every budget made in this load of the package, by its id. A copy of a budget
+# (readRDS() of a saved one, unserialize(), or one rebuilt from its fields) is a
+# different environment carrying the same id, and is refused: only the registered
+# object is the ledger.
+.morie_dp_ledgers <- new.env(parent = emptyenv())
 
 #' What a privacy budget has spent
 #'
@@ -169,6 +235,7 @@ dpbudget <- function(epsilon, delta = 0) {
 #' invisible(dplaphist(c(10, 20), epsilon = 0.25, budget = b))
 #' dpspent(b)$remaining_epsilon
 dpspent <- function(budget) {
+  .rmd_bounds()
   .morie_dp_check_budget(budget)
   list(epsilon = budget$epsilon, delta = budget$delta,
        spent_epsilon = budget$spent_epsilon, spent_delta = budget$spent_delta,
@@ -189,9 +256,33 @@ print.dpbudget <- function(x, ...) {
 .morie_dp_charge <- function(budget, epsilon, delta = 0) {
   if (is.null(budget)) return(invisible())
   .morie_dp_check_budget(budget)
-  tol <- 1e-12
-  if (budget$spent_epsilon + epsilon > budget$epsilon + tol ||
-      budget$spent_delta + delta > budget$delta + tol) {
+  # the ledger lives in this process: a forked child spends from its own copy,
+  # which the parent never sees, so a fork could spend the whole budget again. A
+  # fork shares the token, so the PID tells it apart; another session can have the
+  # same PID (PID namespaces, reuse), so the token tells that apart.
+  if (!identical(budget$pid, Sys.getpid()) ||
+      !identical(budget$token, .morie_dp_token())) {
+    stop("a privacy budget cannot be spent from a forked worker or another ",
+         "R process: spend it in the process that created it, or give each ",
+         "worker its own budget and account for the total by composition; ",
+         "nothing was released.", call. = FALSE)
+  }
+  id <- budget$id
+  own <- if (is.character(id) && length(id) == 1L && !is.na(id) && nzchar(id)) {
+    get0(id, envir = .morie_dp_ledgers, inherits = FALSE)
+  }
+  if (!identical(own, budget)) {
+    stop("this budget is a copy (saved and read back, unserialized, or rebuilt) of ",
+         "one made in this session: a copy would start a second ledger and spend the ",
+         "budget twice. Charge the budget it was copied from; nothing was released.",
+         call. = FALSE)
+  }
+  if (budget$delta == 0 && delta > 0) {
+    stop(sprintf(paste0("this release has delta %.3g, and the budget is for pure DP ",
+                        "(delta 0); nothing was released."), delta), call. = FALSE)
+  }
+  if (!.morie_dp_fits(budget$spent_epsilon, epsilon, budget$epsilon, budget$releases) ||
+      !.morie_dp_fits(budget$spent_delta, delta, budget$delta, budget$releases)) {
     stop(sprintf(paste0("this release (epsilon %.4g, delta %.3g) exceeds the ",
                         "remaining budget (epsilon %.4g, delta %.3g); nothing was ",
                         "released."),
@@ -204,11 +295,64 @@ print.dpbudget <- function(x, ...) {
   invisible()
 }
 
+# Whether `amount` fits in `total` once `spent` is charged. The slack covers rounding
+# only: each of the n releases and the total was rounded to a double once (half an
+# ulp each) and each addition to the running sum rounds once more, so (n + 2) ulps of
+# the larger of total and spent + amount bound the error, 2.2e-16 * (n + 2)
+# relative. An amount more than twice what remains is refused whatever the slack, so
+# a budget that is spent, or a tiny one, never pays for a multiple of what is left.
+.morie_dp_fits <- function(spent, amount, total, n) {
+  if (amount == 0) return(TRUE)
+  left <- total - spent
+  slack <- (n + 2) * .Machine$double.eps * max(total, spent + amount)
+  amount <= left + slack && amount <= 2 * left
+}
+
+# A random token for this load of the package, from the OS CSPRNG
+# (rmoriebricklayer::rndbytes()): drawn from R's generator it would follow
+# set.seed(), and two sessions seeded alike, or started alike in containers,
+# would share it. A forked worker inherits it with the namespace, which is why the
+# PID is checked as well.
+.morie_dp_token <- function() {
+  if (is.null(.morie_dp_rng$token)) {
+    .morie_dp_rng$token <- paste(as.character(.rmd_bl("rndbytes")(16L)), collapse = "")
+  }
+  .morie_dp_rng$token
+}
+
 .morie_dp_check_budget <- function(budget) {
   if (!inherits(budget, "dpbudget")) {
     stop("`budget` must come from dpbudget().", call. = FALSE)
   }
   invisible()
+}
+
+# `x` as plain numbers: its storage (an integer or double vector, matrix or array) with
+# only its names, dim and dimnames. An object of any other class is refused in words:
+# a class's own arithmetic, conversion and printing went into the result (dplaphist()
+# of bit64 integer64 counts returned noised doubles still classed integer64, which
+# printed as about 4.6e18), and integer64 holds its numbers as bits that are not a
+# double's value. With `tables`, a table (table(), xtabs()) is taken as its counts and
+# their labels.
+.morie_plain <- function(x, what, tables = FALSE) {
+  # a label on a number (haven and Hmisc for survey data, I()) is not another kind of
+  # number: the numbers under it are taken
+  lab <- c("haven_labelled", "vctrs_vctr", "labelled", "AsIs", "double", "integer",
+           "numeric")
+  if (length(oldClass(x)) && all(oldClass(x) %in% lab) && is.numeric(unclass(x))) {
+    x <- unclass(x)
+  }
+  cl <- oldClass(x)
+  if (length(cl) && !(tables && all(cl %in% c("table", "xtabs")))) {
+    stop(sprintf(paste0("`%s` must be plain numbers, not an object of class %s; ",
+                        "convert it with as.numeric() first."),
+                 what, paste(cl, collapse = "/")), call. = FALSE)
+  }
+  # anything else (a list, a function, an environment) is left to the caller's checks
+  if (!is.atomic(x)) return(x)
+  a <- attributes(x)
+  attributes(x) <- a[intersect(names(a), c("names", "dim", "dimnames"))]
+  x
 }
 
 # ---- mechanisms --------------------------------------------------------------
@@ -228,7 +372,10 @@ print.dpbudget <- function(x, ...) {
 #' `set.seed()` has no effect. `epsilon` is used as a rational with
 #' denominator \eqn{2^{20}}, rounded down.
 #'
-#' @param truecnt Non-negative integer; the true count.
+#' @param truecnt Non-negative integer, at most \eqn{2^{52}}; the true
+#'   count. Up to that bound the count plus its noise is exact in a double
+#'   unless the noise exceeds \eqn{2^{52}} in magnitude, which has
+#'   probability below \eqn{e^{-2^{32}}} at the smallest `epsilon`.
 #' @param epsilon Privacy loss (smaller means more noise, stronger privacy).
 #' @param budget Optional [dpbudget()] to charge `epsilon` against.
 #' @return The noised count, a whole number (it can be negative; clip with
@@ -250,19 +397,26 @@ print.dpbudget <- function(x, ...) {
 #' # (for illustration; releasing many answers spends many epsilons).
 #' mean(replicate(500, dplapcnt(42, epsilon = 1.0)))
 dplapcnt <- function(truecnt, epsilon, budget = NULL) {
+  .rmd_bounds()
+  truecnt <- .morie_plain(truecnt, "truecnt", tables = TRUE)
+  epsilon <- .morie_plain(epsilon, "epsilon")
   if (length(truecnt) != 1L || !is.numeric(truecnt) ||
     !is.finite(truecnt) || truecnt < 0 ||
     truecnt != floor(truecnt)) {
     stop("`truecnt` must be a single non-negative integer.", call. = FALSE)
   }
-  # above 2^53 a double cannot carry the count and a unit of noise distinctly
-  if (truecnt > 2^53) {
-    stop("`truecnt` must not exceed 2^53: the noise would be lost in ",
-         "the representation and the release would equal the true count.",
+  # the release is formed in doubles, which hold every whole number up to
+  # 2^53 exactly: a count up to 2^52 plus noise of magnitude up to 2^52 is
+  # exact. The noise passes 2^52 with probability below exp(-2^32) at the
+  # smallest epsilon (2^-20). At 2^53 - 1 the sum rounded and some offsets
+  # never occurred.
+  if (truecnt > 2^52) {
+    stop("`truecnt` must not exceed 2^52 (4503599627370496), where a ",
+         "count plus its noise is still exact in a double.",
          call. = FALSE)
   }
-  if (length(epsilon) != 1L || is.na(epsilon) ||
-    !is.numeric(epsilon) || epsilon <= 0) {
+  if (length(epsilon) != 1L || !is.numeric(epsilon) ||
+    !is.finite(epsilon) || epsilon <= 0) {
     stop("`epsilon` must be a single positive number.", call. = FALSE)
   }
   q <- .morie_dp_rational(epsilon)
@@ -278,7 +432,8 @@ dplapcnt <- function(truecnt, epsilon, budget = NULL) {
 #' \eqn{\epsilon}-DP under the add-or-remove-one relation. Noise and sampler
 #' as in [dplapcnt()].
 #'
-#' @param counts Vector of non-negative whole-number bin counts.
+#' @param counts Vector of non-negative whole-number bin counts, each at most
+#'   \eqn{2^{52}} (see [dplapcnt()]).
 #' @param epsilon Privacy loss for the whole histogram (positive scalar).
 #' @param budget Optional [dpbudget()] to charge `epsilon` against.
 #' @return A numeric vector of whole numbers, the same length as `counts`
@@ -295,19 +450,23 @@ dplapcnt <- function(truecnt, epsilon, budget = NULL) {
 #' counts <- as.integer(table(complaint_sample$year))
 #' dplaphist(counts, epsilon = 1.0)
 dplaphist <- function(counts, epsilon, budget = NULL) {
+  .rmd_bounds()
+  counts <- .morie_plain(counts, "counts", tables = TRUE)
+  epsilon <- .morie_plain(epsilon, "epsilon")
   if (!is.numeric(counts) || length(counts) == 0L || any(!is.finite(counts)) ||
     any(counts < 0) || any(counts != floor(counts))) {
     stop("`counts` must be a non-empty vector of non-negative integers.",
       call. = FALSE
     )
   }
-  if (any(counts > 2^53)) {
-    stop("`counts` must not exceed 2^53: the noise would be lost in ",
-         "the representation and the release would equal the true counts.",
+  # exact sums only, as in dplapcnt()
+  if (any(counts > 2^52)) {
+    stop("`counts` must not exceed 2^52 (4503599627370496), where a ",
+         "count plus its noise is still exact in a double.",
          call. = FALSE)
   }
   if (length(epsilon) != 1L || !is.numeric(epsilon) ||
-    is.na(epsilon) || epsilon <= 0) {
+    !is.finite(epsilon) || epsilon <= 0) {
     stop("`epsilon` must be a single positive number.", call. = FALSE)
   }
   q <- .morie_dp_rational(epsilon)
@@ -315,7 +474,11 @@ dplaphist <- function(counts, epsilon, budget = NULL) {
   noise <- vapply(seq_along(counts), function(i) {
     .morie_dp_dlaplace1(q[["s"]], q[["t"]])
   }, numeric(1))
-  as.numeric(counts) + noise
+  out <- as.numeric(counts) + noise
+  # names, dims and a table's labels stay with the counts (.morie_plain() kept only
+  # those); a class does not
+  attributes(out) <- attributes(counts)
+  out
 }
 
 #' Differentially-private mean via the analytic Gaussian mechanism
@@ -351,6 +514,12 @@ dplaphist <- function(counts, epsilon, budget = NULL) {
 #' dpgmean(x, lower = -5, upper = 5, epsilon = 1.0)
 dpgmean <- function(x, lower, upper, epsilon, delta = 1e-6,
                                    budget = NULL) {
+  .rmd_bounds()
+  x <- .morie_plain(x, "x")
+  lower <- .morie_plain(lower, "lower")
+  upper <- .morie_plain(upper, "upper")
+  epsilon <- .morie_plain(epsilon, "epsilon")
+  delta <- .morie_plain(delta, "delta")
   if (!is.numeric(x) || length(x) == 0L) {
     stop("`x` must be a non-empty numeric vector.", call. = FALSE)
   }
@@ -365,7 +534,7 @@ dpgmean <- function(x, lower, upper, epsilon, delta = 1e-6,
     )
   }
   if (length(epsilon) != 1L || !is.numeric(epsilon) ||
-    is.na(epsilon) || epsilon <= 0) {
+    !is.finite(epsilon) || epsilon <= 0) {
     stop("`epsilon` must be a single positive number.", call. = FALSE)
   }
   if (length(delta) != 1L || !is.numeric(delta) ||

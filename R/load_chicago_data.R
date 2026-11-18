@@ -20,10 +20,20 @@
 #' @param type One of \code{"arrests"} or \code{"complaints"}.
 #' @param as Return format: \code{"data.frame"} (default), \code{"tibble"}, or
 #'   \code{"parquet_path"} (writes a Parquet file under \code{tempdir()}
-#'   and returns its path; nothing is written to the user's home).
+#'   and returns its path; nothing is written to the user's home). Parquet
+#'   keeps no time zone, so \code{date} reads back as the same instant in
+#'   UTC; \code{date_iso} keeps the local time and offset.
 #' @param full If \code{TRUE}, fetch the complete dataset from Socrata (network,
 #'   large) instead of the bundled sample; a complete fetch is cached as
-#'   Parquet (see Description).
+#'   Parquet (see Description). The result has the bundled sample's columns,
+#'   in its order and with its types, derived from Socrata's export as the
+#'   sample was. Text in Socrata's export is read as decimal numbers only
+#'   (hexadecimal, \code{Inf} and numbers past the double range are not
+#'   numbers here); a value that does not fit its column becomes \code{NA},
+#'   with one warning per column that counts such values and shows the first.
+#'   A mirror's or the cache's file in the sample's own columns must fit
+#'   exactly, and is refused otherwise with an error naming the column and
+#'   the file.
 #' @param limit Optional row cap. For a \code{full = TRUE} fetch it is passed to
 #'   the Socrata \code{$limit} parameter (a bounded fetch skips the mirror
 #'   and is never written to the full-dataset cache); otherwise it keeps the
@@ -34,14 +44,26 @@
 #'   \code{limit} is set to \code{ceiling(total * fraction)} (of the bundled
 #'   sample's rows otherwise). Give either
 #'   \code{fraction} or \code{limit}, not both.
-#' @param mirror Optional base URL of an r-universe/drat mirror to try before
-#'   Socrata (offline-friendly fallback). Defaults to
-#'   \code{getOption("rmoriedata.mirror")}. The mirror's
+#' @param mirror Optional base URL of an r-universe/drat mirror, or a local
+#'   directory, to try before Socrata (offline-friendly fallback). Defaults to
+#'   \code{getOption("rmoriedata.mirror")}. A URL is downloaded over https
+#'   and a local directory read in place; either way the file is checked
+#'   against \code{<type>_full.parquet.sha256} when the mirror has one beside
+#'   it, and a file that does not match is refused. A local file with no
+#'   \code{.sha256} beside it is read as it is, unchecked. If the mirror
+#'   fails, Socrata is used. The mirror's
 #'   \code{<type>_full.parquet} must use snappy or no compression and
 #'   data pages v1: the package's own reader supports nothing else.
 #' @param refresh If \code{TRUE}, ignore the cache of the
 #'   complete dataset and fetch it again (the cache is rewritten). A cache
-#'   file that cannot be read is discarded and refetched regardless.
+#'   whose bytes do not match its \code{.sha256}, or that is not a Parquet
+#'   file, is deleted and fetched again regardless, and one without a usable
+#'   \code{.sha256} is fetched again and rewritten. A cache that cannot be
+#'   read for any other reason (memory that runs short, a read that fails,
+#'   an option such as \code{rmoriedata.parquet_max_rows}) is kept: the call
+#'   stops and says why. The cache is opened once and read a page at a
+#'   time, each part checked against the digest taken as it was opened; it
+#'   is never held whole.
 #' @return A \code{data.frame}/\code{tibble}, or a length-1 character Parquet
 #'   path when \code{as = "parquet_path"}.
 #' @examples
@@ -85,29 +107,42 @@ chiload <- function(type = c("arrests", "complaints"),
                               limit = NULL,
                               fraction = NULL,
                               refresh = FALSE) {
-  type <- match.arg(type)
-  as <- match.arg(as)
+  .rmd_bounds()
+  type <- .rmd_arg(type, "type")
+  as <- .rmd_arg(as, "as")
   if (!is.null(limit) && !is.null(fraction)) {
     stop("give either `limit` (rows) or `fraction` (share of the dataset), ",
       "not both.",
       call. = FALSE
     )
   }
-  if (!is.null(limit)) {
-    stopifnot(is.numeric(limit), length(limit) == 1L, limit >= 1)
+  for (a in c("full", "refresh")) {
+    v <- get(a)
+    if (!is.logical(v) || length(v) != 1L || is.na(v)) {
+      stop("`", a, "` must be TRUE or FALSE.", call. = FALSE)
+    }
   }
-  if (!is.null(fraction)) {
-    stopifnot(
-      is.numeric(fraction), length(fraction) == 1L,
-      fraction > 0, fraction <= 1
-    )
+  if (!is.null(mirror) && !(is.character(mirror) && length(mirror) == 1L &&
+                            !is.na(mirror))) {
+    stop("`mirror` (by default options(rmoriedata.mirror = )) must be one ",
+         "URL or folder (a string), or NULL.", call. = FALSE)
+  }
+  if (!is.null(limit) && !(is.numeric(limit) && length(limit) == 1L &&
+                           !is.na(limit) && limit >= 1 && limit == floor(limit) &&
+                           limit <= .Machine$integer.max)) {
+    stop("`limit` must be a whole number of rows from 1 to ",
+         .Machine$integer.max, ".", call. = FALSE)
+  }
+  if (!is.null(fraction) && !(is.numeric(fraction) && length(fraction) == 1L &&
+                              !is.na(fraction) && fraction > 0 && fraction <= 1)) {
+    stop("`fraction` must be one number above 0 and at most 1.", call. = FALSE)
   }
 
-  df <- if (isTRUE(full)) {
+  df <- if (full) {
     if (!is.null(fraction)) {
       limit <- max(1L, as.integer(ceiling(.rmd_full_count(type) * fraction)))
     }
-    .rmd_fetch_full(type, mirror, limit, refresh = isTRUE(refresh))
+    .rmd_shape(.rmd_fetch_full(type, mirror, limit, refresh = refresh), type)
   } else {
     # the bundled sample takes the same row cap (it was ignored without full = TRUE)
     s <- .rmd_sample(type)
@@ -137,25 +172,219 @@ chiload <- function(type = c("arrests", "complaints"),
   # package to write outside the session's temporary directory only when
   # the user asks for it.
   d <- getOption("rmoriedata.cache_dir", NULL)
+  if (!is.null(d) && !(is.character(d) && length(d) == 1L && !is.na(d))) {
+    stop("rmoriedata: options(rmoriedata.cache_dir = ) must be the path of ",
+         "one folder (a string)", call. = FALSE)
+  }
   if (is.null(d) || !nzchar(d)) d <- file.path(tempdir(), "rmoriedata-cache")
-  dir.create(d, recursive = TRUE, showWarnings = FALSE)
+  .rmd_mkdir(d)
+}
+
+# The directory, created when missing; an error naming it when it cannot be
+# created or written (a read-only directory, or a file in its place), before any
+# download blames the server for it.
+.rmd_mkdir <- function(d) {
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+  if (!dir.exists(d) || file.access(d, 2L) != 0L) {
+    stop("rmoriedata: cannot write to the cache directory ", d,
+         "; name a writable one with options(rmoriedata.cache_dir = )", call. = FALSE)
+  }
   d
+}
+
+# The bundled sample's columns, in its order and types, from the raw Socrata
+# export, as data-raw/arrest_sample.R and data-raw/complaint_sample.R derive them.
+# A frame that already has the sample's columns (a mirror that serves them) is given
+# the sample's types: a mirror that stores `date` as text would otherwise hand back text.
+.rmd_shape <- function(raw, type) {
+  want <- names(.rmd_sample(type))
+  # where the frame came from, for the messages (.rmd_fetch_full() records it)
+  src <- attr(raw, "rmd_src")
+  attr(raw, "rmd_src") <- NULL
+  # a frame in the sample's columns is a copy written in this package's shape and
+  # must be exact; one in Socrata's raw columns is Socrata's export (live, or as a
+  # mirror or the cache keeps it), whose stray values become NA with a warning
+  if (identical(names(raw), want)) {
+    return(.rmd_retype(raw, .rmd_sample(type), type,
+                       src %||% sprintf("the mirror's %s_full.parquet", type)))
+  }
+  n <- nrow(raw)
+  pick <- function(...) {
+    for (nm in c(...)) if (nm %in% names(raw)) return(.rmd_astext(raw[[nm]]))
+    rep(NA_character_, n)
+  }
+  # an empty field of the CSV export is a missing value; any other text must read as
+  # the sample's type (.rmd_retype() below), not turn into NA or a rounded number
+  num <- function(...) {
+    x <- pick(...)
+    x[!is.na(x) & !nzchar(trimws(x))] <- NA_character_
+    x
+  }
+  when <- num(if (type == "arrests") c("arrest_date", "date") else "date")
+  df <- if (type == "arrests") {
+    data.frame(
+      case_number = pick("case_number", "case_no", "cb_no"),
+      date_iso = NA_character_, date = when, race = pick("race"),
+      charge_type = pick("charge_1_type", "charge1type"),
+      charge_class = pick("charge_1_class", "charge1class"),
+      charge_desc = pick("charge_1_description", "charge1description"),
+      charge_statute = pick("charge_1_statute", "charge1statute"),
+      stringsAsFactors = FALSE
+    )
+  } else {
+    data.frame(
+      case_number = pick("case_number"), date_iso = NA_character_, date = when,
+      iucr = pick("iucr"), primary_type = pick("primary_type"),
+      description = pick("description"),
+      arrest = num("arrest"), domestic = num("domestic"),
+      beat = num("beat"), district = num("district"), ward = num("ward"),
+      community_area = num("community_area"), fbi_code = pick("fbi_code"),
+      year = num("year"), latitude = num("latitude"), longitude = num("longitude"),
+      stringsAsFactors = FALSE
+    )
+  }
+  df <- .rmd_retype(df, .rmd_sample(type), type, src %||% "Socrata's export",
+                    lenient = TRUE)
+  df$date_iso <- format(df$date, "%Y-%m-%dT%H:%M:%S%z")
+  df
+}
+
+# Each column of `raw` coerced to the type of the same column of the sample `s`; a
+# column whose values do not all survive the coercion is an error naming it and the
+# source: a value that would change (text "1.5" read as the integer 1, 2 as TRUE,
+# "0x1A" as 26, "1e400" as Inf) is refused, not rounded. In Socrata's export
+# (`lenient`), which the package cannot correct, such values are NA instead, with
+# one warning per column that counts them and shows the first: one stray value no
+# longer refuses a download of millions of rows.
+.rmd_retype <- function(raw, s, type,
+                        src = sprintf("the mirror's %s_full.parquet", type),
+                        lenient = FALSE) {
+  for (nm in names(s)) {
+    x <- raw[[nm]]
+    to <- s[[nm]]
+    y <- tryCatch(suppressWarnings(
+      if (inherits(to, "POSIXct")) {
+        if (inherits(x, "POSIXct")) {
+          x
+        } else if (is.character(x)) {
+          .rmd_ptime(x)
+        }
+      } else if (is.character(to)) {
+        if (is.atomic(x)) .rmd_text(x)
+      } else if (is.atomic(x) && !is.object(x)) {
+        .rmd_exact(x, typeof(to))
+      }
+    ), error = function(e) NULL)
+    shape <- is.null(y) || length(y) != length(x)
+    gone <- if (shape) TRUE else is.na(y) & !is.na(x)
+    if (shape || (any(gone) && !lenient)) {
+      stop(sprintf("%s has a column `%s` that cannot be read as the sample's %s",
+                   src, nm, class(to)[[1L]]), call. = FALSE)
+    }
+    if (any(gone)) {
+      warning(sprintf(paste0("%s has %d value(s) in column `%s` that cannot be read ",
+                             "as the sample's %s (the first: \"%s\"); they are NA"),
+                      src, sum(gone), nm, class(to)[[1L]],
+                      .rmd_text(x[which(gone)[[1L]]])), call. = FALSE)
+    }
+    if (inherits(to, "POSIXct")) attr(y, "tzone") <- attr(to, "tzone")
+    raw[[nm]] <- y
+  }
+  raw
+}
+
+# `x` (logical, numeric or text) as `type` ("integer", "double" or "logical"), with NA
+# for every value that does not convert exactly: a fraction or a number past the
+# integer range for an integer, anything but 0 or 1 (or text true/false) for a logical.
+.rmd_exact <- function(x, type) {
+  if (type == "logical") {
+    if (is.logical(x)) return(x)
+    if (is.character(x)) return(as.logical(x))
+    return(ifelse(x %in% c(0, 1), x == 1, NA))
+  }
+  # text is read as decimal only: as.numeric() also takes hexadecimal ("0x1A" is
+  # 26), "Inf" and numbers past the double range ("1e400" is Inf). No column of
+  # the samples holds an infinite value, so one is refused.
+  d <- if (is.character(x)) .rmd_decimal(x) else as.numeric(x)
+  d[!is.na(d) & !is.finite(d)] <- NA
+  if (type == "double") return(d)
+  ok <- !is.na(d) & d == trunc(d) & abs(d) <= .Machine$integer.max
+  d[!ok] <- NA
+  as.integer(d)
+}
+
+# Decimal text as numbers, NA for anything else (hexadecimal, Inf, NaN, words), read
+# by .rmd_num(): correctly rounded, the same on every platform.
+.rmd_decimal <- function(x) .rmd_num(trimws(x))
+
+# A column of Socrata's export as text. A mirror may hold `date` as a timestamp
+# or a date: as.character() drops the time at midnight and writes the clock in
+# the column's zone, which .rmd_ptime() then read as Chicago time. An instant is
+# written with its "Z"; a date is midnight on the Chicago clock, as Socrata's
+# floating timestamps are.
+.rmd_astext <- function(v) {
+  if (inherits(v, "POSIXct")) {
+    return(format(v, "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"))
+  }
+  if (inherits(v, "Date")) {
+    return(format(v, "%Y-%m-%dT00:00:00"))
+  }
+  # a number in full, the same under any options(scipen = ): as.character() kept 15
+  # digits and wrote 1e+05
+  .rmd_text(v)
+}
+
+# ISO 8601 text as POSIXct. A time with an offset or "Z" is that instant (strptime
+# ignores the zone, which read 10:00Z as 10:00 in Chicago, five hours off); one
+# without is Chicago local time, as Socrata's floating timestamps are. Anything else,
+# trailing text included, is NA.
+.rmd_ptime <- function(x) {
+  re <- paste0("^([0-9]{4}-[0-9]{2}-[0-9]{2})[T ]",
+               "([0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?)",
+               "(Z|[+-][0-9]{2}(:?[0-9]{2})?)?$")
+  ok <- !is.na(x) & grepl(re, x)
+  out <- rep(NA_real_, length(x))
+  local <- paste(sub(re, "\\1", x[ok]), sub(re, "\\2", x[ok]))
+  zone <- sub(re, "\\4", x[ok])
+  fmt <- "%Y-%m-%d %H:%M:%OS"
+  # the wall clock read in UTC, less the offset; or, with no offset, in Chicago
+  utc <- as.numeric(as.POSIXct(local, tz = "UTC", format = fmt))
+  chi <- as.numeric(as.POSIXct(local, tz = "America/Chicago", format = fmt))
+  digits <- gsub("[^0-9]", "", zone) # "", "05", "0530"
+  hh <- suppressWarnings(as.numeric(substr(digits, 1L, 2L)))
+  mm <- suppressWarnings(as.numeric(substr(digits, 3L, 4L)))
+  mm[is.na(mm)] <- 0
+  sgn <- ifelse(startsWith(zone, "-"), -1, 1)
+  off <- ifelse(nzchar(digits), sgn * (hh * 3600 + mm * 60), 0)
+  off[nzchar(digits) & (hh > 23 | mm > 59)] <- NA
+  out[ok] <- ifelse(nzchar(zone), utc - off, chi)
+  as.POSIXct(out, origin = "1970-01-01", tz = "America/Chicago")
 }
 
 #' Clear the cache of full Chicago datasets
 #'
 #' Deletes the Parquet files that \code{chiload(full = TRUE)}
-#' wrote to the cache directory: \code{tempdir()} by default, or the
-#' directory named in \code{options(rmoriedata.cache_dir = )}.
+#' wrote to the cache directory (\code{tempdir()} by default, or the
+#' directory named in \code{options(rmoriedata.cache_dir = )}): the
+#' \code{arrests_full.parquet} and \code{complaints_full.parquet} files,
+#' their \code{.sha256} checksum files and any unfinished write
+#' (\code{write-*.parquet} and its \code{.sha256}). Nothing else in that
+#' directory is touched.
 #'
 #' @return The cache directory, invisibly.
 #' @examples
 #' chiclr()
 #' @export
 chiclr <- function() {
+  .rmd_bounds()
   d <- .rmd_cache_dir()
-  unlink(list.files(d, full.names = TRUE, all.files = TRUE, no.. = TRUE),
-         recursive = TRUE)
+  # only what chiload() wrote: the directory is the user's, and the hosted tables
+  # are cached under it too
+  own <- paste0("^(arrests|complaints)_full\\.parquet(\\.sha256)?$",
+                "|^write-.*\\.parquet(\\.sha256)?$")
+  mine <- list.files(d, pattern = own,
+                     full.names = TRUE, all.files = TRUE)
+  unlink(mine[!dir.exists(mine)])
   invisible(d)
 }
 
@@ -170,7 +399,7 @@ chiclr <- function() {
 .rmd_full_count <- function(type) {
   u <- paste0(.rmd_endpoint(type), "?$select=count(*)")
   n <- tryCatch(
-    suppressWarnings(as.numeric(utils::read.csv(u)[1, 1])),
+    suppressWarnings(as.numeric(utils::read.csv(file(u, encoding = "native.enc"))[1, 1])),
     error = function(e) NA_real_
   )
   if (is.na(n) || n < 1) {
@@ -189,9 +418,11 @@ chiclr <- function() {
   bounded <- !is.null(limit)
   cache <- file.path(.rmd_cache_dir(), paste0(type, "_full.parquet"))
   if (!bounded && !isTRUE(refresh) && file.exists(cache)) {
-    df <- .rmd_cache_read(cache)
-    if (!is.null(df)) return(df)
-    unlink(c(cache, paste0(cache, ".sha256"))) # damaged or unverified: fetch again
+    df <- .rmd_cache_use(cache)
+    if (!is.null(df)) {
+      attr(df, "rmd_src") <- sprintf("the cached %s", basename(cache))
+      return(df)
+    }
   }
   # The service's own row count decides whether a response is the complete
   # dataset; without it (count endpoint down) only the shape checks apply
@@ -201,7 +432,7 @@ chiclr <- function() {
   n <- if (bounded) as.integer(limit) else max(5000000, expected, na.rm = TRUE)
   urls <- c(
     if (!bounded && !is.null(mirror)) {
-      file.path(mirror, paste0(type, "_full.parquet"))
+      file.path(sub("/+$", "", mirror), paste0(type, "_full.parquet"))
     },
     .rmd_full_url(type, n)
   )
@@ -213,12 +444,15 @@ chiclr <- function() {
     df <- tryCatch(
       withCallingHandlers(
         if (grepl("\\.parquet$", u)) {
-          morie_read_parquet(u)
+          .rmd_mirror_read(u)
         } else {
           # fill = FALSE: a row with a field missing or one too many is a garbled
-          # export, an error here rather than a padded row in the cache
-          utils::read.csv(u, stringsAsFactors = FALSE, check.names = TRUE,
-                          encoding = "UTF-8", fill = FALSE)
+          # export, an error here rather than a padded row in the cache. Every column
+          # as text: a number guessed from the first rows loses an IUCR's leading zero.
+          # native.enc: the bytes as they are, whatever options(encoding = ) says
+          utils::read.csv(file(u, encoding = "native.enc"), stringsAsFactors = FALSE,
+                          check.names = TRUE,
+                          encoding = "UTF-8", fill = FALSE, colClasses = "character")
         },
         warning = function(w) {
           msg <<- c(msg, conditionMessage(w))
@@ -231,7 +465,8 @@ chiclr <- function() {
       }
     )
     if (is.null(df)) {
-      why <- c(why, paste0(u, ": ", if (length(msg)) msg[[1L]] else "no response"))
+      why <- c(why, paste0(u, ": ",
+                           if (length(msg)) .rmd_why(msg[[1L]]) else "no response"))
       next
     }
     bad <- .rmd_full_reject(df, if (bounded) NA_real_ else expected)
@@ -242,7 +477,18 @@ chiclr <- function() {
     # Without the service's count a short export cannot be told from a
     # complete one, so the data is returned but not written across
     # sessions: a bad day stays confined to this session.
-    if (!bounded && !is.na(expected)) try(.rmd_cache_write(df, cache), silent = TRUE)
+    # the call that writes the cache returns what the cache holds, as every later
+    # call (which reads it) does: the two gave different times, and could differ
+    # in anything else the round trip through Parquet changes
+    if (!bounded && !is.na(expected) &&
+        !inherits(try(.rmd_cache_write(df, cache), silent = TRUE), "try-error")) {
+      df <- tryCatch(.rmd_cache_read(cache), error = function(e) NULL) %||% df
+    }
+    attr(df, "rmd_src") <- if (grepl("\\.parquet$", u)) {
+      sprintf("the mirror's %s (%s)", basename(u), u)
+    } else {
+      "Socrata's export"
+    }
     return(df)
   }
   stop("could not fetch full Chicago '", type,
@@ -251,8 +497,52 @@ chiclr <- function() {
   )
 }
 
+# A mirror on the web is downloaded through the package's checked transport
+# (.rmd_dl(), rmoriebricklayer's bldl()); a local directory is read in place.
+# Either way the file is checked against the SHA-256 in `<file>.sha256` when
+# the mirror has one beside it (a local mirror's was ignored, and edited data
+# loaded under the original's digest); with none it is read as it is. An error
+# sends .rmd_fetch_full() on to Socrata.
+.rmd_mirror_read <- function(u) {
+  if (!grepl("^[A-Za-z][A-Za-z0-9+.-]*://", u)) {
+    f <- u
+    side <- paste0(u, ".sha256")
+    want <- if (file.exists(side)) .rmd_side_digest(side) else NA_character_
+  } else {
+    f <- tempfile("mirror-", fileext = ".parquet")
+    side <- paste0(f, ".sha256")
+    on.exit(unlink(c(f, side)), add = TRUE)
+    .rmd_dl(u, f, label = basename(u))
+    want <- tryCatch({
+      .rmd_dl(paste0(u, ".sha256"), side, label = basename(side), quiet = TRUE)
+      .rmd_side_digest(side)
+    }, error = function(e) NA_character_, warning = function(w) NA_character_)
+  }
+  if (!is.na(want) && !grepl("^[0-9a-f]{64}$", want, useBytes = TRUE)) {
+    stop("the mirror's ", basename(u), ".sha256 is not a SHA-256 digest", call. = FALSE)
+  }
+  # opened once: the bytes checked are the bytes read
+  v <- .rmd_vopen(f, verify = !is.na(want), fail = FALSE)
+  if (!is.list(v)) stop("the mirror's ", basename(u), " ", v, call. = FALSE)
+  on.exit(.rmd_vclose(v), add = TRUE)
+  if (!is.na(want) && !identical(v$sha256, want)) {
+    stop("the mirror's ", basename(u), " does not match its SHA-256", call. = FALSE)
+  }
+  morie_read_parquet(v)
+}
+
+# The digest a `<file>.sha256` holds: its first word, ASCII case folded ("" when it
+# is empty). Read once, a regular file only: a FIFO in its place blocked the reader.
+.rmd_side_digest <- function(side) {
+  b <- .rmd_bytes(side, 2^16)
+  if (!is.raw(b)) stop(basename(side), " ", b, call. = FALSE)
+  first <- .rmd_lines(b)[1L]
+  if (is.na(first)) return("")
+  .rmd_lower(sub("[[:space:]].*$", "", trimws(first)))
+}
+
 .rmd_full_url <- function(type, n) {
-  paste0(.rmd_endpoint(type), "?$limit=", format(n, scientific = FALSE))
+  paste0(.rmd_endpoint(type), "?$limit=", .rmd_ntxt(n))
 }
 
 .rmd_full_count_or_na <- function(type) {
@@ -285,7 +575,7 @@ chiclr <- function() {
   tmp2 <- paste0(tmp, ".sha256")
   on.exit(unlink(c(tmp, tmp2)), add = TRUE)
   morie_write_parquet(as.data.frame(df), tmp)
-  writeLines(.rmd_bl("sha256file")(tmp), tmp2)
+  writeLines(.rmd_digest(tmp), tmp2)
   # data first, then its digest: a reader between the two renames sees
   # the new file against the old sidecar and refetches (a wasted fetch),
   # never the new digest against the old file
@@ -295,14 +585,87 @@ chiclr <- function() {
   invisible(path)
 }
 
-# The cached frame, or NULL when the file is unreadable, has no sidecar,
-# or no longer matches it.
+# The cached frame, or NULL when there is no verified cache to read: the file or its
+# sidecar is missing, or the sidecar is not a SHA-256 digest (the cache is then
+# unverified, and the next full fetch writes both again). Bytes that do not match the
+# sidecar, or that match it but are not framed as a Parquet file, are an rmd_damage
+# error (see .rmd_damage()), with their digest in `sha`; any other error (memory, a
+# read that failed, a parse error, an option) is passed on as it is.
+# The file is opened once, its digest taken as it is read through, and the reader
+# then reads it a page at a time through the same descriptor, each range
+# checked against the digests of its blocks: what is parsed is what was hashed, and
+# the file is never held whole (held whole, it took its size again on top of the
+# parse). A sidecar replaced while the file was checked (another session writing the
+# cache: data first, then its sidecar) is read again, once, before the bytes are
+# called bad.
 .rmd_cache_read <- function(path) {
+  v <- .rmd_cache_open(path)
+  if (is.null(v)) return(NULL)
+  on.exit(.rmd_vclose(v))
+  if (!.rmd_pq_framed(v)) .rmd_cache_bad(path, "is not a Parquet file", v)
+  morie_read_parquet(v)
+}
+
+# The cache opened and found to match its sidecar (.rmd_vopen()), or NULL when there
+# is no sidecar to check it against; bytes that do not match it are an rmd_damage
+# error. A sidecar that changed while the file was hashed is read again, once.
+.rmd_cache_open <- function(path) {
+  for (i in 1:2) {
+    want <- .rmd_cache_want(path)
+    if (is.null(want)) return(NULL)
+    v <- .rmd_vopen(path)
+    if (identical(v$sha256, want)) return(v)
+    .rmd_vclose(v)
+    if (i == 2L || identical(.rmd_cache_want(path), want)) {
+      .rmd_cache_bad(path, paste0("does not match its ", basename(path), ".sha256"), v)
+    }
+  }
+}
+
+# The digest the cache's sidecar holds, or NULL when the cache or its sidecar is
+# missing or the sidecar holds no SHA-256 digest.
+.rmd_cache_want <- function(path) {
   side <- paste0(path, ".sha256")
-  if (!file.exists(side)) return(NULL)
-  want <- readLines(side, n = 1L, warn = FALSE)
-  if (!identical(.rmd_bl("sha256file")(path), want)) return(NULL)
-  tryCatch(morie_read_parquet(path), error = function(e) NULL)
+  if (!file.exists(side) || !file.exists(path)) return(NULL)
+  want <- .rmd_side_digest(side)
+  if (grepl("^[0-9a-f]{64}$", want, useBytes = TRUE)) want
+}
+
+# The rmd_damage error for the cache at `path`, opened as `v`, with its digest in `sha`.
+.rmd_cache_bad <- function(path, why, v) {
+  stop(errorCondition(paste(basename(path), why), class = "rmd_damage", call = NULL,
+                      sha = v$sha256))
+}
+
+# Whether the file is framed as a Parquet file: "PAR1" at both ends and a footer length
+# that fits. That is read from the file alone (no option or memory decides it), so a
+# cache that matches its sidecar but is not framed so is a damaged file, not a read
+# that failed.
+.rmd_pq_framed <- function(v) {
+  n <- v$size
+  if (n < 12) return(FALSE)
+  tail <- .pq_at(v, n - 8, 8)
+  len <- .pq_u32(tail[1:4])
+  identical(.pq_at(v, 0, 4), charToRaw("PAR1")) &&
+    identical(tail[5:8], charToRaw("PAR1")) && len >= 2 && len <= n - 12
+}
+
+# The cache read for chiload(), or NULL to fetch again. A cache whose bytes do not
+# match its sidecar is deleted with the sidecar (only while it still holds those
+# bytes). Nothing else deletes it: running out of memory, a read that failed, a parse
+# error or a session option proves nothing about the file, and the call stops saying
+# what happened, with the cache left in place.
+.rmd_cache_use <- function(cache) {
+  tryCatch(.rmd_cache_read(cache),
+    rmd_damage = function(e) {
+      .rmd_drop(cache, e$sha, also = paste0(cache, ".sha256"))
+      NULL
+    },
+    error = function(e) {
+      stop(sprintf(paste0("the cached %s could not be read (%s); it was left in place: ",
+                          "run again, or fetch it anew with refresh = TRUE"),
+                   basename(cache), conditionMessage(e)), call. = FALSE)
+    })
 }
 
 .rmd_write_parquet <- function(df, type, full) {

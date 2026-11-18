@@ -7,17 +7,89 @@
 morie_read_parquet(path, columns = NULL)
 }
 \arguments{
-\item{path}{Path to a \code{.parquet} file.}
+\item{path}{Path to a \code{.parquet} file (opened once, only when it is a
+regular file, and read a page at a time, never held whole), or the
+file's bytes as a raw vector.}
 
 \item{columns}{Optional character vector of column names to decode;
-the rest are skipped entirely.}
+the rest are skipped entirely. \code{character(0)} gives a data frame with
+the file's rows and no columns. A name the file gives two columns names
+the first of them.}
 }
 \value{
-A \code{data.frame}.
+A \code{data.frame}. Every error the reader raises, a missing or
+damaged file included, starts with \verb{parquet:}; no base-R warning escapes
+it (a value a damaged file makes R warn about is an error instead).
 }
 \description{
 Native Parquet reader: no nanoparquet, no arrow. Handles the v1
-format with PLAIN, RLE and dictionary encodings, GZIP, Snappy or no
-compression. Nested and repeated columns are refused.
+format with PLAIN, RLE and dictionary encodings, GZIP (one or more gzip
+members a page), Snappy, Zstandard (ZSTD) or no compression. ZSTD pages
+are read by a decoder in the package (RFC 8878, without dictionaries), so
+no other package is needed for them;
+the writer does not write ZSTD. Nested and repeated columns are refused.
+}
+\details{
+A string column comes back as text marked UTF-8 (ASCII text stays
+unmarked, as R keeps it). A Parquet string is UTF-8 by definition, and
+\code{\link[=morie_write_parquet]{morie_write_parquet()}} refuses to write anything else, so a value that
+is not valid UTF-8, or that holds a NUL byte, is refused with a
+\verb{parquet:} error naming the column: returned, it would fail later in
+\code{nchar()} or \code{toupper()}.
+
+Three options bound what a file can make the reader do, each checked
+from the file's footer and page headers before anything is allocated or
+inflated: \code{rmoriedata.parquet_max_rows} (default 5e7 rows),
+\code{rmoriedata.parquet_max_page_bytes} (default 2^30 bytes a page) and
+\code{rmoriedata.parquet_max_text_bytes} (default 2^32 bytes, 4 GiB). The
+last is the most text and fixed-length bytes the compressed pages of one
+file may inflate to, summed over the columns read; pages stored
+uncompressed are not counted. A file past a bound is refused with an
+error naming the option to raise.
+
+A DECIMAL is a double: its scaled value, exact when the unscaled whole
+number is below 2^53 and the scale at most 22, otherwise the nearest
+double to the whole number, divided by the power of ten, with a warning
+that it is rounded. One whose whole number is past the range of a double,
+or whose precision and scale the format does not allow for its type, is
+refused. A UUID is text (\code{"8-4-4-4-12"} lower-case hexadecimal), and a
+FLOAT16 a double. Other fixed-length bytes (an INTERVAL, or bytes with no
+logical type) are refused by name.
+
+An INT32 column is an integer column unless one of its values cannot be
+an R integer, which is -2147483648 (-2^31, R's \code{NA_integer_}): then the
+whole column is a double. This is decided once for the whole column,
+across all its pages and row groups, from the values in its rows: an
+entry of a dictionary that no row uses does not count. Columns of 8 and
+16 bits (stored as INT32) are integer columns, and an unsigned 32-bit
+column is a double column, whether the file marks the type by its
+converted type (\code{UINT_8}, \code{INT_16}, \code{UINT_32}, ...) or by its logical
+type (\code{INT(8, false)}, as arrow writes \code{uint8}, ...). A value outside
+the marked width (an unsigned 8-bit column holding 256, or the word
+0xFFFFFFFF, which is -1 as an INT32) is a damaged file and is refused,
+naming the column and the value, as other values the format does not
+allow are; so is a width the format does not give the stored type (an
+INT32 marked 64 bits wide, an INT64 marked 8, 16 or 32). Every 32- and
+64-bit word is a value of its width, signed or unsigned. Every other
+64-bit column is a double column: exact below 2^53, otherwise the nearest
+double, with a warning that it is rounded.
+
+Where a column's logical type and its converted type disagree (\code{UINT_32}
+with a signed \code{INT(32)}, or with an unsigned \code{INT(8)}), the logical type
+is read, as the format says and arrow does, for every type: the
+converted type is read only when the file gives no logical type.
+
+A TIMESTAMP (in milliseconds, microseconds or nanoseconds, or the legacy
+INT96) is a \code{POSIXct} in UTC, and a TIME a \code{difftime} in seconds. Each
+is the double nearest to its exact number of seconds, rounded once and
+without a warning. A \code{POSIXct} is a double: it holds about 16 significant
+digits, so within 2^33 seconds (272 years) of 1970 it resolves a
+microsecond and around 2025 steps of about 238 nanoseconds; a time in
+nanoseconds is the nearest such value, not the nanosecond itself.
+
+Column names are the file's names exactly: an empty name stays \code{""}, a
+name used twice stays twice, and no name is changed to make it
+syntactic or unique (text that is valid UTF-8 is marked UTF-8). A file
+with no columns reads as a data frame of its rows and no columns.
 }
 \keyword{internal}

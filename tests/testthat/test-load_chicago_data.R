@@ -66,8 +66,8 @@ test_that("a corrupted cell is detected, so the check above can fail", {
 })
 
 test_that("type + as are validated", {
-  expect_error(chiload("bogus"), "should be one of")
-  expect_error(chiload("arrests", as = "xml"), "should be one of")
+  expect_error(chiload("bogus"), "`type` must be one of")
+  expect_error(chiload("arrests", as = "xml"), "`as` must be one of")
 })
 
 test_that("full=TRUE fetches live Chicago data (opt-in only)", {
@@ -163,4 +163,394 @@ test_that("the cache directory is tempdir() unless the user names one", {
   writeLines("x", file.path(mine, "arrests_full.parquet"))
   expect_identical(normalizePath(chiclr()), normalizePath(mine))
   expect_length(list.files(mine), 0L)
+})
+
+test_that("chiclr() removes only what chiload() wrote and leaves the rest", {
+  mine <- withr::local_tempdir()
+  withr::local_options(rmoriedata.cache_dir = mine)
+  own <- file.path(mine, c("arrests_full.parquet", "arrests_full.parquet.sha256",
+                           "complaints_full.parquet", "write-ab12.parquet",
+                           "write-ab12.parquet.sha256"))
+  # a user's own *_full.parquet is not chiload()'s: it was deleted (F3)
+  keep <- file.path(mine, c("notes.txt", "my_full.parquet.bak", ".hidden",
+                            "crimes_full.parquet", "myreport_full.parquet"))
+  dir.create(file.path(mine, "hosted", "fec"), recursive = TRUE)
+  dir.create(file.path(mine, "odd_full.parquet"))
+  for (f in c(own, keep, file.path(mine, "hosted", "fec", "t.csv.gz"))) writeLines("x", f)
+  chiclr()
+  expect_false(any(file.exists(own)))
+  expect_true(all(file.exists(keep)))
+  expect_true(file.exists(file.path(mine, "hosted", "fec", "t.csv.gz")))
+  expect_true(dir.exists(file.path(mine, "odd_full.parquet")))
+})
+
+test_that("chiload's arguments are checked in its own words", {
+  for (bad in list(Inf, 1e10, "10", NA, c(1, 2), 0, 2.5)) {
+    expect_error(chiload("arrests", full = TRUE, limit = bad),
+                 "`limit` must be a whole number of rows from 1 to 2147483647.",
+                 fixed = TRUE)
+  }
+  for (bad in list(0, 1.5, -0.1, NA, "0.5", c(0.1, 0.2))) {
+    expect_error(chiload("arrests", full = TRUE, fraction = bad),
+                 "`fraction` must be one number above 0 and at most 1.", fixed = TRUE)
+  }
+  for (bad in list("yes", NA, 1, c(TRUE, FALSE), NULL)) {
+    expect_error(chiload("arrests", full = bad), "`full` must be TRUE or FALSE.",
+                 fixed = TRUE)
+    expect_error(chiload("arrests", refresh = bad), "`refresh` must be TRUE or FALSE.",
+                 fixed = TRUE)
+  }
+})
+
+# Rows as Socrata's CSV export gives them, every field as text.
+raw_complaints <- function() {
+  data.frame(
+    id = c("14380668", "14381189"), case_number = c("JK477973", "JK478752"),
+    date = c("2026-07-05T13:30:00.000", "2026-01-05T00:00:00.000"),
+    block = c("022XX W JACKSON BLVD", "092XX S HALSTED ST"), iucr = c("0560", "031A"),
+    primary_type = c("ASSAULT", "ROBBERY"), description = c("SIMPLE", "ARMED: HANDGUN"),
+    location_description = c("APARTMENT", "STREET"), arrest = c("false", "true"),
+    domestic = c("true", "false"), beat = c("1225", "2223"), district = c("12", "22"),
+    ward = c("27", ""), community_area = c("28", "73"), fbi_code = c("08A", "03"),
+    x_coordinate = c("1161646", "1172599"), y_coordinate = c("1898661", "1843643"),
+    year = c("2026", "2026"), updated_on = c("2026-11-12T15:45:23.000", ""),
+    latitude = c("41.87760112", ""), longitude = c("-87.681941224", "-87.6"),
+    location = c("(41.87, -87.68)", ""), stringsAsFactors = FALSE
+  )
+}
+
+raw_arrests <- function() {
+  data.frame(
+    cb_no = c("30642834", "30642831"), case_number = c("", "JK483991"),
+    arrest_date = c("2026-11-09T23:50:00.000", "2026-02-01T08:05:00.000"),
+    race = c("WHITE", "BLACK"),
+    charge_1_statute = c("625 ILCS 5.0/11-501-A-1", "720 ILCS"),
+    charge_1_description = c("DUI", "POSS CAN"), charge_1_type = c("M", "F"),
+    charge_1_class = c("A", "4"), charge_2_statute = c("x", ""),
+    charges_type = c("M | M", "F |"), stringsAsFactors = FALSE
+  )
+}
+
+test_that("a full fetch has the bundled sample's columns, order and types", {
+  for (type in c("complaints", "arrests")) {
+    raw <- if (type == "arrests") raw_arrests() else raw_complaints()
+    testthat::local_mocked_bindings(.rmd_fetch_full = function(...) raw)
+    got <- chiload(type, full = TRUE)
+    s <- chiload(type)
+    expect_identical(names(got), names(s))
+    expect_identical(lapply(got, class), lapply(s, class))
+    expect_identical(attr(got$date, "tzone"), attr(s$date, "tzone"))
+    expect_identical(nrow(got), 2L)
+  }
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) raw_complaints())
+  got <- chiload("complaints", full = TRUE)
+  expect_identical(got$iucr, c("0560", "031A"))
+  expect_identical(got$date_iso,
+                   c("2026-07-05T13:30:00-0500", "2026-01-05T00:00:00-0600"))
+  expect_identical(format(got$date, "%Y-%m-%d %H:%M"),
+                   c("2026-07-05 13:30", "2026-01-05 00:00"))
+  expect_identical(got$arrest, c(FALSE, TRUE))
+  expect_identical(got$ward, c(27L, NA))
+  expect_identical(got$latitude, c(41.87760112, NA))
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) raw_arrests())
+  a <- chiload("arrests", full = TRUE)
+  expect_identical(a$case_number, c("", "JK483991"))
+  expect_identical(a$charge_desc, c("DUI", "POSS CAN"))
+  expect_identical(a$date_iso, c("2026-11-09T23:50:00-0600", "2026-02-01T08:05:00-0600"))
+  # a frame already in the sample's shape (a mirror serving it) passes unchanged
+  s <- chiload("arrests", limit = 3)
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) s)
+  expect_identical(chiload("arrests", full = TRUE), s)
+})
+
+test_that("a mirror URL is downloaded, checked against its .sha256 and used", {
+  local_chicago_cache()
+  src <- withr::local_tempfile(fileext = ".parquet")
+  served <- data.frame(id = as.character(1:5), x = letters[1:5], stringsAsFactors = FALSE)
+  morie_write_parquet(served, src)
+  sha <- .rmd_bl("sha256file")(src)
+  st <- new.env()
+  st$urls <- character()
+  st$sha <- sha
+  testthat::local_mocked_bindings(
+    .rmd_dl = function(url, dest, ...) {
+      st$urls <- c(st$urls, url)
+      if (endsWith(url, ".sha256")) {
+        if (is.null(st$sha)) stop("bldl: answered HTTP 404", call. = FALSE)
+        writeLines(paste0(st$sha, "  arrests_full.parquet"), dest)
+      } else {
+        file.copy(src, dest, overwrite = TRUE)
+      }
+      invisible(dest)
+    },
+    .rmd_full_count_or_na = function(type) 5,
+    .rmd_full_url = function(type, n) "file:///nonexistent/socrata.csv"
+  )
+  got <- .rmd_fetch_full("arrests", "https://mirror.example.test/cran/")
+  # the frame carries where it came from, for chiload()'s messages
+  expect_match(attr(got, "rmd_src"), "^the mirror's arrests_full.parquet \\(https://")
+  expect_identical(got, served, ignore_attr = "rmd_src")
+  u <- "https://mirror.example.test/cran/arrests_full.parquet"
+  expect_identical(st$urls, c(u, paste0(u, ".sha256")))
+  # no .sha256 beside it: used as it is
+  st$sha <- NULL
+  expect_identical(.rmd_fetch_full("arrests", "https://mirror.example.test/cran",
+                                   refresh = TRUE), served, ignore_attr = "rmd_src")
+  # a digest that does not match: the mirror is skipped and Socrata asked
+  st$sha <- strrep("0", 64)
+  testthat::local_mocked_bindings(.rmd_full_url = function(type, n) {
+    f <- tempfile(fileext = ".csv")
+    writeLines(c("id,x", "1,a", "2,b", "3,c", "4,d", "5,e"), f)
+    paste0("file://", f)
+  })
+  got <- .rmd_fetch_full("arrests", "https://mirror.example.test/cran", refresh = TRUE)
+  expect_identical(got$x, letters[1:5])
+  # and a failing mirror falls back the same way
+  testthat::local_mocked_bindings(.rmd_dl = function(...) stop("bldl: answered HTTP 404"))
+  expect_identical(nrow(.rmd_fetch_full("arrests", "https://mirror.example.test/cran",
+                                        refresh = TRUE)), 5L)
+})
+
+test_that("a local mirror's .sha256 is checked, and refused when it differs", {
+  local_chicago_cache()
+  m <- withr::local_tempdir()
+  pq <- file.path(m, "arrests_full.parquet")
+  served <- data.frame(id = as.character(1:5), x = letters[1:5], stringsAsFactors = FALSE)
+  morie_write_parquet(served, pq)
+  testthat::local_mocked_bindings(
+    .rmd_full_count_or_na = function(type) 5,
+    .rmd_full_url = function(type, n) "file:///nonexistent/socrata.csv"
+  )
+  # no digest beside it: read as it is
+  expect_identical(.rmd_fetch_full("arrests", m), served, ignore_attr = "rmd_src")
+  writeLines(.rmd_bl("sha256file")(pq), paste0(pq, ".sha256"))
+  expect_identical(.rmd_fetch_full("arrests", m, refresh = TRUE), served,
+                   ignore_attr = "rmd_src")
+  # the data edited under the original's digest: refused, Socrata asked
+  ed <- served
+  ed$x[1] <- "EDITED"
+  morie_write_parquet(ed, pq)
+  expect_error(.rmd_fetch_full("arrests", m, refresh = TRUE),
+               "arrests_full.parquet does not match its SHA-256")
+  writeLines("not a digest", paste0(pq, ".sha256"))
+  expect_error(.rmd_fetch_full("arrests", m, refresh = TRUE),
+               "arrests_full.parquet.sha256 is not a SHA-256 digest")
+})
+
+test_that("a cache directory that cannot be written is named, not blamed on the server", {
+  f <- withr::local_tempfile()
+  writeLines("x", f)
+  withr::local_options(rmoriedata.cache_dir = f)
+  msg <- paste0("rmoriedata: cannot write to the cache directory ", f)
+  expect_error(.rmd_cache_dir(), msg, fixed = TRUE)
+  expect_error(hostcat(), "cannot write to the cache directory", fixed = TRUE)
+  skip_on_os("windows")
+  d <- withr::local_tempdir()
+  Sys.chmod(d, "0555")
+  withr::defer(Sys.chmod(d, "0755"))
+  skip_if(file.access(d, 2L) == 0L, "running as a user who can write anywhere")
+  withr::local_options(rmoriedata.cache_dir = d)
+  expect_error(hostload("db/t"), paste0("cannot write to the cache directory ", d, ";"),
+               fixed = TRUE)
+})
+
+test_that("a mirror with the sample's column names is given the sample's types", {
+  s <- chiload("complaints", limit = 3)
+  m <- s
+  m$date <- format(s$date, "%Y-%m-%dT%H:%M:%S")
+  m$year <- as.character(s$year)
+  m$arrest <- as.character(s$arrest)
+  m$latitude <- as.character(s$latitude)
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) m)
+  got <- chiload("complaints", full = TRUE)
+  expect_identical(lapply(got, class), lapply(s, class))
+  expect_identical(attr(got$date, "tzone"), attr(s$date, "tzone"))
+  expect_equal(got, s)
+  # a POSIXct in UTC, as Parquet reads a timestamp back, is the same instant
+  a <- chiload("arrests", limit = 3)
+  u <- a
+  attr(u$date, "tzone") <- "UTC"
+  u$date_iso <- factor(u$date_iso)
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) u)
+  expect_identical(chiload("arrests", full = TRUE), a)
+  # a column that cannot be read as the sample's type is refused, naming it
+  bad <- s
+  bad$beat <- c("x", "y", "z")
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) bad)
+  expect_error(chiload("complaints", full = TRUE),
+               "column `beat` that cannot be read as the sample's integer", fixed = TRUE)
+  bad <- s
+  bad$date <- c("yesterday", "today", "tomorrow")
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) bad)
+  expect_error(chiload("complaints", full = TRUE), "column `date`", fixed = TRUE)
+  bad <- s
+  bad$ward <- bad$ward + 0.5
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) bad)
+  expect_error(chiload("complaints", full = TRUE), "column `ward`", fixed = TRUE)
+})
+
+test_that("an offset time is that instant; a value that does not fit is refused", {
+  s <- data.frame(beat = 1L,
+                  date = as.POSIXct("2024-01-01 10:00:00", tz = "America/Chicago"),
+                  arrest = TRUE)
+  r <- function(beat = "2", date = "2024-06-01T10:00:00Z", arrest = "true") {
+    .rmd_retype(data.frame(beat = beat, date = date, arrest = arrest,
+                           stringsAsFactors = FALSE), s, "complaints")
+  }
+  at <- as.numeric(as.POSIXct("2024-06-01 10:00:00", tz = "UTC"))
+  for (d in c("2024-06-01T10:00:00Z", "2024-06-01T10:00:00+00:00",
+              "2024-06-01 10:00:00+0000", "2024-06-01T05:00:00-05:00",
+              "2024-06-01T05:00:00-05", "2024-06-01T15:30:00+05:30")) {
+    got <- r(date = d)$date
+    expect_identical(as.numeric(got), at, info = d)
+    expect_identical(attr(got, "tzone"), "America/Chicago", info = d)
+  }
+  expect_identical(as.numeric(r(date = "2024-06-01T10:00:00.25Z")$date), at + 0.25)
+  # no offset: Chicago's wall clock, as Socrata's floating times are
+  expect_identical(format(r(date = "2024-06-01T10:00:00")$date, "%H:%M %Z"), "10:00 CDT")
+  expect_identical(format(r(date = "2024-01-05 00:00:00")$date, "%H:%M %Z"), "00:00 CST")
+  expect_identical(r(arrest = 0)$arrest, FALSE)
+  expect_identical(r(arrest = "false")$arrest, FALSE)
+  expect_identical(r(beat = "1225")$beat, 1225L)
+  expect_identical(r(beat = 7)$beat, 7L)
+  refused <- function(col, ...) {
+    expect_error(r(...), sprintf("has a column `%s` that cannot be read as", col),
+                 fixed = TRUE)
+  }
+  refused("beat", beat = "1.5")
+  refused("beat", beat = 1.5)
+  refused("beat", beat = "3000000000")
+  refused("beat", beat = "12 a")
+  refused("arrest", arrest = 2)
+  refused("arrest", arrest = "2")
+  refused("arrest", arrest = "yes")
+  refused("date", date = "2024-06-01T10:00:00 junk")
+  refused("date", date = "2024-06-01T10:00:00+25:00")
+  refused("date", date = "2024-02-30T10:00:00")
+  refused("date", date = "2024-06-01")
+  # in Socrata's export an empty field is NA, and so is a stray value, with a warning
+  # that names the column: one bad value does not refuse the whole download
+  raw <- raw_complaints()
+  raw$ward[1L] <- "27.5"
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) raw)
+  expect_warning(got <- chiload("complaints", full = TRUE),
+                 "Socrata's export has 1 value(s) in column `ward` that cannot be read",
+                 fixed = TRUE)
+  expect_identical(got$ward, c(NA_integer_, NA_integer_))
+  raw <- raw_complaints()
+  raw$date[2L] <- "2026-01-05T06:00:00Z"
+  raw$arrest[2L] <- ""
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) raw)
+  got <- chiload("complaints", full = TRUE)
+  expect_identical(got$date_iso[2L], "2026-01-05T00:00:00-0600")
+  expect_identical(got$arrest, c(FALSE, NA))
+})
+
+test_that("text is read as decimal only, finite, and errors name the source (N12)", {
+  expect_identical(.rmd_exact(c("0x1A", "26", " 7 ", "+3", "1e3"), "integer"),
+                   c(NA, 26L, 7L, 3L, 1000L))
+  expect_identical(.rmd_exact(c("1e400", "Inf", "-inf", "NaN", "0x10", "41.5", ".5"),
+                              "double"), c(NA, NA, NA, NA, NA, 41.5, 0.5))
+  expect_identical(.rmd_exact(c(Inf, 2), "double"), c(NA, 2))
+  s <- data.frame(beat = 1L, latitude = 41.5)
+  r <- function(...) {
+    .rmd_retype(data.frame(..., stringsAsFactors = FALSE), s, "complaints")
+  }
+  expect_error(r(beat = "0x1A", latitude = "1"), "column `beat`")
+  expect_error(r(beat = "1", latitude = "1e400"), "column `latitude`")
+  expect_error(r(beat = "1", latitude = "Inf"), "column `latitude`")
+  # a mirror's file in Socrata's raw columns is named as the mirror, not as Socrata
+  raw <- raw_complaints()
+  raw$beat[1L] <- "x"
+  attr(raw, "rmd_src") <- "the mirror's complaints_full.parquet (/m/x.parquet)"
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) raw)
+  expect_warning(chiload("complaints", full = TRUE),
+                 "the mirror's complaints_full.parquet (/m/x.parquet) has 1 value",
+                 fixed = TRUE)
+  # and one in the sample's columns is refused, naming the file it came from
+  s3 <- chiload("complaints", limit = 2)
+  s3$beat <- c("x", "1")
+  attr(s3, "rmd_src") <- "the cached complaints_full.parquet"
+  testthat::local_mocked_bindings(.rmd_fetch_full = function(...) s3)
+  expect_error(chiload("complaints", full = TRUE),
+               "the cached complaints_full.parquet has a column `beat`", fixed = TRUE)
+})
+
+test_that("a stray value in a live export no longer refuses the download (lead 3)", {
+  # an export served as a file, through the same reader a live one goes through
+  raw <- raw_complaints()
+  raw$latitude[1L] <- "N/A"
+  f <- withr::local_tempfile(fileext = ".csv")
+  utils::write.csv(raw, f, row.names = FALSE)
+  testthat::local_mocked_bindings(
+    .rmd_full_count_or_na = function(type) NA_real_,
+    .rmd_full_url = function(type, n) f)
+  withr::local_options(rmoriedata.cache_dir = withr::local_tempdir())
+  expect_warning(got <- chiload("complaints", full = TRUE),
+                 paste("Socrata's export has 1 value(s) in column `latitude` that",
+                       "cannot be read as the sample's numeric (the first: \"N/A\");",
+                       "they are NA"),
+                 fixed = TRUE)
+  expect_identical(nrow(got), 2L)
+  expect_identical(got$latitude, c(NA_real_, NA_real_))
+  expect_identical(got$beat, c(1225L, 2223L))
+})
+
+test_that("an argument given no choice is refused in words", {
+  expect_error(chiload(type = character(0)), "`type` must be one of")
+  expect_error(chiload("arrests", as = NA_character_), "`as` must be one of")
+})
+
+test_that("options cache_dir and mirror that are not one string are refused", {
+  for (bad in list(1, NA, TRUE, c("a", "b"))) {
+    withr::local_options(rmoriedata.cache_dir = bad)
+    expect_error(.rmd_cache_dir(), paste0(
+      "^rmoriedata: options\\(rmoriedata.cache_dir = \\) must be the path ",
+      "of one folder \\(a string\\)$"), info = deparse(bad))
+  }
+  withr::local_options(rmoriedata.cache_dir = NULL)
+  for (bad in list(1, NA, TRUE, c("a", "b"))) {
+    withr::local_options(rmoriedata.mirror = bad)
+    expect_error(chiload("arrests"),
+                 "`mirror` (by default options(rmoriedata.mirror = )) must be",
+                 fixed = TRUE)
+    expect_error(chiload("arrests", mirror = bad), "`mirror` (", fixed = TRUE)
+  }
+  withr::local_options(rmoriedata.mirror = NULL)
+  expect_s3_class(chiload("arrests", mirror = tempdir()), "data.frame")
+})
+
+test_that("the call that writes the full cache returns what every later call reads", {
+  for (type in c("arrests", "complaints")) {
+    local_chicago_cache()
+    s <- .rmd_sample(type)
+    m <- withr::local_tempdir()
+    # times with a part of a millisecond, as arrow and pandas keep them: written in
+    # microseconds they are read back as the same doubles
+    s$date <- s$date + 0.000123
+    s$case_number[1L] <- ""
+    mf <- file.path(m, paste0(type, "_full.parquet"))
+    morie_write_parquet(s, mf)
+    testthat::local_mocked_bindings(.rmd_full_count_or_na = function(type) nrow(s))
+    a <- chiload(type, full = TRUE, mirror = m)
+    b <- chiload(type, full = TRUE, mirror = m)
+    expect_identical(a, b)
+    expect_identical(as.numeric(a$date), as.numeric(morie_read_parquet(mf)$date))
+    expect_identical(round(as.numeric(a$date) %% 1, 6), round(as.numeric(s$date) %% 1, 6))
+    expect_identical(chiload(type, full = TRUE, mirror = m, as = "tibble"),
+                     chiload(type, full = TRUE, mirror = m, as = "tibble"))
+  }
+  # a mirror holding what the cache cannot (finer than a microsecond, as a file of
+  # nanoseconds gives): the first call returns what the cache holds too
+  for (type in c("arrests", "complaints")) {
+    local_chicago_cache()
+    m <- withr::local_tempdir()
+    fine <- .rmd_sample(type)
+    fine$date <- fine$date + 1e-7
+    testthat::local_mocked_bindings(.rmd_mirror_read = function(u) fine,
+                                    .rmd_full_count_or_na = function(type) nrow(fine))
+    a <- chiload(type, full = TRUE, mirror = m)
+    expect_identical(chiload(type, full = TRUE, mirror = m), a)
+    expect_true(file.exists(file.path(.rmd_cache_dir(), paste0(type, "_full.parquet"))))
+  }
 })

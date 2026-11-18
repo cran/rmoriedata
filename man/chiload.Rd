@@ -19,15 +19,30 @@ chiload(
 
 \item{as}{Return format: \code{"data.frame"} (default), \code{"tibble"}, or
 \code{"parquet_path"} (writes a Parquet file under \code{tempdir()}
-and returns its path; nothing is written to the user's home).}
+and returns its path; nothing is written to the user's home). Parquet
+keeps no time zone, so \code{date} reads back as the same instant in
+UTC; \code{date_iso} keeps the local time and offset.}
 
 \item{full}{If \code{TRUE}, fetch the complete dataset from Socrata (network,
 large) instead of the bundled sample; a complete fetch is cached as
-Parquet (see Description).}
+Parquet (see Description). The result has the bundled sample's columns,
+in its order and with its types, derived from Socrata's export as the
+sample was. Text in Socrata's export is read as decimal numbers only
+(hexadecimal, \code{Inf} and numbers past the double range are not
+numbers here); a value that does not fit its column becomes \code{NA},
+with one warning per column that counts such values and shows the first.
+A mirror's or the cache's file in the sample's own columns must fit
+exactly, and is refused otherwise with an error naming the column and
+the file.}
 
-\item{mirror}{Optional base URL of an r-universe/drat mirror to try before
-Socrata (offline-friendly fallback). Defaults to
-\code{getOption("rmoriedata.mirror")}. The mirror's
+\item{mirror}{Optional base URL of an r-universe/drat mirror, or a local
+directory, to try before Socrata (offline-friendly fallback). Defaults to
+\code{getOption("rmoriedata.mirror")}. A URL is downloaded over https
+and a local directory read in place; either way the file is checked
+against \code{<type>_full.parquet.sha256} when the mirror has one beside
+it, and a file that does not match is refused. A local file with no
+\code{.sha256} beside it is read as it is, unchecked. If the mirror
+fails, Socrata is used. The mirror's
 \code{<type>_full.parquet} must use snappy or no compression and
 data pages v1: the package's own reader supports nothing else.}
 
@@ -45,7 +60,14 @@ sample's rows otherwise). Give either
 
 \item{refresh}{If \code{TRUE}, ignore the cache of the
 complete dataset and fetch it again (the cache is rewritten). A cache
-file that cannot be read is discarded and refetched regardless.}
+whose bytes do not match its \code{.sha256}, or that is not a Parquet
+file, is deleted and fetched again regardless, and one without a usable
+\code{.sha256} is fetched again and rewritten. A cache that cannot be
+read for any other reason (memory that runs short, a read that fails,
+an option such as \code{rmoriedata.parquet_max_rows}) is kept: the call
+stops and says why. The cache is opened once and read a page at a
+time, each part checked against the digest taken as it was opened; it
+is never held whole.}
 }
 \value{
 A \code{data.frame}/\code{tibble}, or a length-1 character Parquet
